@@ -565,12 +565,9 @@ type checksumReader struct {
 	wantN   uint64
 	wantCRC uint32
 	err     error
-	mu      sync.Mutex
 }
 
 func (r *checksumReader) Read(p []byte) (int, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.err != nil {
 		return 0, r.err
 	}

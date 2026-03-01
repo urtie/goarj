@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -27,6 +28,8 @@ const (
 	ExtractUnlimitedFiles = -1
 	// ExtractUnlimitedBytes disables byte quotas when used in ExtractOptions.
 	ExtractUnlimitedBytes int64 = -1
+
+	extractCopyBufferSize = 256 << 10
 )
 
 type extractedDir struct {
@@ -111,6 +114,12 @@ var extractTestHookBeforeTempPathMetadataTimestampCall func(path, entryName stri
 // extractTestHookAfterTempPathMetadataTimestampCall is used by tests to force
 // deterministic races immediately after temp-path Chtimes.
 var extractTestHookAfterTempPathMetadataTimestampCall func(path, entryName string, staged *os.File) error
+
+var extractCopyBufferPool = sync.Pool{
+	New: func() any {
+		return make([]byte, extractCopyBufferSize)
+	},
+}
 
 // ExtractAll extracts all archive entries under dir.
 //
@@ -304,6 +313,12 @@ func runExtractTestHookAfterTempPathMetadataTimestampCall(path, entryName string
 		return extractTestHookAfterTempPathMetadataTimestampCall(path, entryName, staged)
 	}
 	return nil
+}
+
+func copyExtractData(dst io.Writer, src io.Reader) (int64, error) {
+	buf := extractCopyBufferPool.Get().([]byte)
+	defer extractCopyBufferPool.Put(buf)
+	return io.CopyBuffer(dst, src, buf)
 }
 
 func (w *extractQuotaWriter) Write(p []byte) (int, error) {

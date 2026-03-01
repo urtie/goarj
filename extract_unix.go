@@ -293,7 +293,7 @@ func (r *unixExtractRoot) extractOneFile(relPath, entryName string, f *File, quo
 		}
 	}()
 
-	if _, err := io.Copy(&extractQuotaWriter{dst: tmpFile, quota: quota}, rc); err != nil {
+	if _, err := copyExtractData(&extractQuotaWriter{dst: tmpFile, quota: quota}, rc); err != nil {
 		return err
 	}
 	if err := applyExtractMetadataToFD(int(tmpFile.Fd()), entryName, f.Mode(), f.ModTime()); err != nil {
@@ -358,7 +358,7 @@ func (r *unixExtractRoot) extractOneStreamFile(relPath, entryName string, h *Fil
 		}
 	}()
 
-	if _, err := io.Copy(&extractQuotaWriter{dst: tmpFile, quota: quota}, rc); err != nil {
+	if _, err := copyExtractData(&extractQuotaWriter{dst: tmpFile, quota: quota}, rc); err != nil {
 		return err
 	}
 	if err := rc.Close(); err != nil {

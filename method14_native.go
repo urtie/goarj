@@ -7,23 +7,30 @@ import (
 )
 
 const (
-	methodCodeBit = 16
-	methodThresh  = 3
-	methodDICSize = 26624
-	methodFDIC    = 32768
-	methodMaxM    = 256
-	methodNC      = 255 + methodMaxM + 2 - methodThresh
-	methodNP      = 16 + 1
-	methodCBIT    = 9
-	methodNT      = methodCodeBit + 3
-	methodPBIT    = 5
-	methodTBIT    = 5
-	methodNPT     = methodNT
-	methodCTable  = 4096
-	methodPTable  = 256
+	methodCodeBit  = 16
+	methodThresh   = 3
+	methodDICSize  = 26624
+	methodFDIC     = 32768
+	methodFDICMask = methodFDIC - 1
+	methodMaxM     = 256
+	methodNC       = 255 + methodMaxM + 2 - methodThresh
+	methodNP       = 16 + 1
+	methodCBIT     = 9
+	methodNT       = methodCodeBit + 3
+	methodPBIT     = 5
+	methodTBIT     = 5
+	methodNPT      = methodNT
+	methodCTable   = 4096
+	methodPTable   = 256
 
 	method14CompressorChunkSize = 64 << 10
 )
+
+var method14LowMask16 = [17]uint64{
+	0x0, 0x1, 0x3, 0x7, 0xf, 0x1f, 0x3f, 0x7f,
+	0xff, 0x1ff, 0x3ff, 0x7ff, 0xfff, 0x1fff, 0x3fff, 0x7fff,
+	0xffff,
+}
 
 type method14Input struct {
 	io.Reader
@@ -84,7 +91,7 @@ type arjBitStreamReader struct {
 	remaining int64
 	bitPos    uint64
 	totalBits uint64
-	bitBuf    uint32
+	bitBuf    uint64
 	bitCount  uint8
 	err       error
 	scratch   [8]byte
@@ -92,6 +99,18 @@ type arjBitStreamReader struct {
 
 type method123Decoder struct {
 	br        method14BitReader
+	blockSize int
+
+	ptLen   [methodNPT]uint8
+	cLen    [methodNC]uint8
+	left    [2*methodNC - 1]uint16
+	right   [2*methodNC - 1]uint16
+	cTable  [methodCTable]uint16
+	ptTable [methodPTable]uint16
+}
+
+type method123BitStreamDecoder struct {
+	br        *arjBitStreamReader
 	blockSize int
 
 	ptLen   [methodNPT]uint8
@@ -112,8 +131,28 @@ type method123StreamDecoder struct {
 	err       error
 }
 
+type method123FastStreamDecoder struct {
+	dec       method123BitStreamDecoder
+	dict      [methodDICSize]byte
+	dictPos   int
+	remaining uint64
+	matchSrc  int
+	matchLen  int
+	err       error
+}
+
 type method4StreamDecoder struct {
 	br        method14BitReader
+	dict      [methodFDIC]byte
+	dictPos   int
+	remaining uint64
+	matchSrc  int
+	matchLen  int
+	err       error
+}
+
+type method4FastStreamDecoder struct {
+	br        *arjBitStreamReader
 	dict      [methodFDIC]byte
 	dictPos   int
 	remaining uint64
@@ -181,12 +220,12 @@ func decompressorMethod14(method uint16) Decompressor {
 		case Method1, Method2, Method3:
 			return &method14StreamingReadCloser{
 				method: method,
-				r:      newMethod123StreamDecoder(br, ctx.uncompressedSize),
+				r:      newMethod123FastStreamDecoder(br, ctx.uncompressedSize),
 			}
 		case Method4:
 			return &method14StreamingReadCloser{
 				method: method,
-				r:      newMethod4StreamDecoder(br, ctx.uncompressedSize),
+				r:      newMethod4FastStreamDecoder(br, ctx.uncompressedSize),
 			}
 		default:
 			return &method14ErrorReadCloser{err: ErrAlgorithm}
@@ -534,6 +573,143 @@ func decodeMethod4Len(br method14BitReader) (int, error) {
 	return c, nil
 }
 
+func decodeMethod4PtrStream(br *arjBitStreamReader) (int, error) {
+	if br.err != nil {
+		return 0, br.err
+	}
+	if int(br.bitCount) < 17 {
+		if err := br.fillLookahead(17); err != nil {
+			return 0, err
+		}
+	}
+	if int(br.bitCount) >= 17 {
+		bc := int(br.bitCount)
+		prefix := uint8((br.bitBuf >> (bc - 4)) & 0xF)
+
+		k := 0
+		for k < 4 && ((prefix>>(3-k))&1) != 0 {
+			k++
+		}
+		width := 9 + k
+		consumedPrefix := k + 1
+		if k == 4 {
+			consumedPrefix = 4
+		}
+		totalConsumed := consumedPrefix + width
+		extraShift := bc - totalConsumed
+		extra := int((br.bitBuf >> extraShift) & method14LowMask16[width])
+		plus := 0
+		if k > 0 {
+			plus = 512 * ((1 << k) - 1)
+		}
+
+		br.bitCount -= uint8(totalConsumed)
+		br.bitPos += uint64(totalConsumed)
+		if br.bitCount == 0 {
+			br.bitBuf = 0
+		}
+		return plus + extra, nil
+	}
+
+	plus := 0
+	pwr := 1 << 9
+	c := 0
+	width := 0
+
+	for width = 9; width < 13; width++ {
+		v, err := br.getBitFast()
+		if err != nil {
+			return 0, err
+		}
+		c = int(v)
+		if c == 0 {
+			break
+		}
+		plus += pwr
+		pwr <<= 1
+	}
+	if width != 0 {
+		v, err := br.getBitsFast(width)
+		if err != nil {
+			return 0, err
+		}
+		c = int(v)
+	}
+	c += plus
+	return c, nil
+}
+
+func decodeMethod4LenStream(br *arjBitStreamReader) (int, error) {
+	if br.err != nil {
+		return 0, br.err
+	}
+	if int(br.bitCount) < 14 {
+		if err := br.fillLookahead(14); err != nil {
+			return 0, err
+		}
+	}
+	if int(br.bitCount) >= 14 {
+		bc := int(br.bitCount)
+		prefix := uint8((br.bitBuf >> (bc - 7)) & 0x7F)
+
+		width := 0
+		for width < 7 && ((prefix>>(6-width))&1) != 0 {
+			width++
+		}
+		consumedPrefix := width + 1
+		if width == 7 {
+			consumedPrefix = 7
+		}
+		if width == 0 {
+			br.bitCount--
+			br.bitPos++
+			if br.bitCount == 0 {
+				br.bitBuf = 0
+			}
+			return 0, nil
+		}
+
+		totalConsumed := consumedPrefix + width
+		extraShift := bc - totalConsumed
+		extra := int((br.bitBuf >> extraShift) & method14LowMask16[width])
+		plus := (1 << width) - 1
+
+		br.bitCount -= uint8(totalConsumed)
+		br.bitPos += uint64(totalConsumed)
+		if br.bitCount == 0 {
+			br.bitBuf = 0
+		}
+		return plus + extra, nil
+	}
+
+	plus := 0
+	pwr := 1
+	c := 0
+	width := 0
+
+	for width = 0; width < 7; width++ {
+		v, err := br.getBitFast()
+		if err != nil {
+			return 0, err
+		}
+		c = int(v)
+		if c == 0 {
+			break
+		}
+		plus += pwr
+		pwr <<= 1
+	}
+	if width != 0 {
+		v, err := br.getBitsFast(width)
+		if err != nil {
+			return 0, err
+		}
+		c = int(v)
+	}
+	c += plus
+	return c, nil
+}
+
 func method14CanFastMatchCopy(src, dst, n, dictSize int) bool {
 	if n <= 0 || src < 0 || dst < 0 {
 		return false
@@ -544,8 +720,56 @@ func method14CanFastMatchCopy(src, dst, n, dictSize int) bool {
 	return src+n <= dst || dst+n <= src
 }
 
+func method4CopyMatchToDictAndOut(dict *[methodFDIC]byte, dstPos, srcPos int, out []byte) (int, int) {
+	off := 0
+	for off < len(out) {
+		remaining := len(out) - off
+		dstContig := methodFDIC - dstPos
+		srcContig := methodFDIC - srcPos
+		chunk := remaining
+		if chunk > dstContig {
+			chunk = dstContig
+		}
+		if chunk > srcContig {
+			chunk = srcContig
+		}
+
+		if srcPos < dstPos && srcPos+chunk > dstPos {
+			dist := dstPos - srcPos
+			copied := 0
+			for copied < chunk {
+				step := chunk - copied
+				if step > dist {
+					step = dist
+				}
+				copy(
+					dict[dstPos+copied:dstPos+copied+step],
+					dict[srcPos+copied:srcPos+copied+step],
+				)
+				copied += step
+			}
+		} else {
+			copy(dict[dstPos:dstPos+chunk], dict[srcPos:srcPos+chunk])
+		}
+		copy(out[off:off+chunk], dict[dstPos:dstPos+chunk])
+
+		dstPos = (dstPos + chunk) & methodFDICMask
+		srcPos = (srcPos + chunk) & methodFDICMask
+		off += chunk
+	}
+	return dstPos, srcPos
+}
+
 func newMethod123StreamDecoder(br method14BitReader, origSize uint64) *method123StreamDecoder {
 	d := &method123StreamDecoder{
+		remaining: origSize,
+	}
+	d.dec.br = br
+	return d
+}
+
+func newMethod123FastStreamDecoder(br *arjBitStreamReader, origSize uint64) *method123FastStreamDecoder {
+	d := &method123FastStreamDecoder{
 		remaining: origSize,
 	}
 	d.dec.br = br
@@ -654,8 +878,117 @@ func (d *method123StreamDecoder) Read(p []byte) (int, error) {
 	return 0, io.EOF
 }
 
+func (d *method123FastStreamDecoder) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		if d.err != nil {
+			return 0, d.err
+		}
+		return 0, nil
+	}
+	if d.err != nil {
+		return 0, d.err
+	}
+	if d.remaining == 0 {
+		return 0, io.EOF
+	}
+
+	n := 0
+	for n < len(p) && d.remaining > 0 {
+		if d.matchLen > 0 {
+			run := d.matchLen
+			if maxOut := len(p) - n; run > maxOut {
+				run = maxOut
+			}
+			if maxRemain := int(d.remaining); run > maxRemain {
+				run = maxRemain
+			}
+			if run > 0 && method14CanFastMatchCopy(d.matchSrc, d.dictPos, run, methodDICSize) {
+				copy(d.dict[d.dictPos:d.dictPos+run], d.dict[d.matchSrc:d.matchSrc+run])
+				copy(p[n:n+run], d.dict[d.matchSrc:d.matchSrc+run])
+				d.remaining -= uint64(run)
+				d.matchLen -= run
+				n += run
+				d.dictPos += run
+				d.matchSrc += run
+				if d.dictPos >= methodDICSize {
+					d.dictPos -= methodDICSize
+				}
+				if d.matchSrc >= methodDICSize {
+					d.matchSrc -= methodDICSize
+				}
+				continue
+			}
+
+			b := d.dict[d.matchSrc]
+			d.dict[d.dictPos] = b
+			p[n] = b
+			n++
+			d.remaining--
+			d.dictPos++
+			if d.dictPos >= methodDICSize {
+				d.dictPos = 0
+			}
+			d.matchSrc++
+			if d.matchSrc >= methodDICSize {
+				d.matchSrc = 0
+			}
+			d.matchLen--
+			continue
+		}
+
+		c, err := d.dec.decodeC()
+		if err != nil {
+			d.err = err
+			break
+		}
+		if c <= 0xFF {
+			b := byte(c)
+			d.dict[d.dictPos] = b
+			p[n] = b
+			n++
+			d.remaining--
+			d.dictPos++
+			if d.dictPos >= methodDICSize {
+				d.dictPos = 0
+			}
+			continue
+		}
+
+		j := c - (0xFF + 1 - methodThresh)
+		if j <= 0 || uint64(j) > d.remaining {
+			d.err = ErrFormat
+			break
+		}
+		ptr, err := d.dec.decodeP()
+		if err != nil {
+			d.err = err
+			break
+		}
+		d.matchSrc = d.dictPos - ptr - 1
+		for d.matchSrc < 0 {
+			d.matchSrc += methodDICSize
+		}
+		d.matchLen = j
+	}
+
+	if n > 0 {
+		return n, nil
+	}
+	if d.err != nil {
+		return 0, d.err
+	}
+	return 0, io.EOF
+}
+
 func newMethod4StreamDecoder(br method14BitReader, origSize uint64) *method4StreamDecoder {
 	return &method4StreamDecoder{
+		br:        br,
+		remaining: origSize,
+	}
+}
+
+func newMethod4FastStreamDecoder(br *arjBitStreamReader, origSize uint64) *method4FastStreamDecoder {
+	return &method4FastStreamDecoder{
 		br:        br,
 		remaining: origSize,
 	}
@@ -691,31 +1024,14 @@ func (d *method4StreamDecoder) Read(p []byte) (int, error) {
 				d.remaining -= uint64(run)
 				d.matchLen -= run
 				n += run
-				d.dictPos += run
-				d.matchSrc += run
-				if d.dictPos >= methodFDIC {
-					d.dictPos -= methodFDIC
-				}
-				if d.matchSrc >= methodFDIC {
-					d.matchSrc -= methodFDIC
-				}
+				d.dictPos = (d.dictPos + run) & methodFDICMask
+				d.matchSrc = (d.matchSrc + run) & methodFDICMask
 				continue
 			}
-
-			b := d.dict[d.matchSrc]
-			d.dict[d.dictPos] = b
-			p[n] = b
-			n++
-			d.remaining--
-			d.dictPos++
-			if d.dictPos >= methodFDIC {
-				d.dictPos = 0
-			}
-			d.matchSrc++
-			if d.matchSrc >= methodFDIC {
-				d.matchSrc = 0
-			}
-			d.matchLen--
+			d.dictPos, d.matchSrc = method4CopyMatchToDictAndOut(&d.dict, d.dictPos, d.matchSrc, p[n:n+run])
+			d.remaining -= uint64(run)
+			d.matchLen -= run
+			n += run
 			continue
 		}
 
@@ -735,10 +1051,7 @@ func (d *method4StreamDecoder) Read(p []byte) (int, error) {
 			p[n] = b
 			n++
 			d.remaining--
-			d.dictPos++
-			if d.dictPos >= methodFDIC {
-				d.dictPos = 0
-			}
+			d.dictPos = (d.dictPos + 1) & methodFDICMask
 			continue
 		}
 
@@ -756,10 +1069,95 @@ func (d *method4StreamDecoder) Read(p []byte) (int, error) {
 			d.err = ErrFormat
 			break
 		}
-		d.matchSrc = d.dictPos - ptr - 1
-		if d.matchSrc < 0 {
-			d.matchSrc += methodFDIC
+		d.matchSrc = (d.dictPos - ptr - 1) & methodFDICMask
+		d.matchLen = j
+	}
+
+	if n > 0 {
+		return n, nil
+	}
+	if d.err != nil {
+		return 0, d.err
+	}
+	return 0, io.EOF
+}
+
+func (d *method4FastStreamDecoder) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		if d.err != nil {
+			return 0, d.err
 		}
+		return 0, nil
+	}
+	if d.err != nil {
+		return 0, d.err
+	}
+	if d.remaining == 0 {
+		return 0, io.EOF
+	}
+
+	n := 0
+	for n < len(p) && d.remaining > 0 {
+		if d.matchLen > 0 {
+			run := d.matchLen
+			if maxOut := len(p) - n; run > maxOut {
+				run = maxOut
+			}
+			if maxRemain := int(d.remaining); run > maxRemain {
+				run = maxRemain
+			}
+			if run > 0 && method14CanFastMatchCopy(d.matchSrc, d.dictPos, run, methodFDIC) {
+				copy(d.dict[d.dictPos:d.dictPos+run], d.dict[d.matchSrc:d.matchSrc+run])
+				copy(p[n:n+run], d.dict[d.matchSrc:d.matchSrc+run])
+				d.remaining -= uint64(run)
+				d.matchLen -= run
+				n += run
+				d.dictPos = (d.dictPos + run) & methodFDICMask
+				d.matchSrc = (d.matchSrc + run) & methodFDICMask
+				continue
+			}
+			d.dictPos, d.matchSrc = method4CopyMatchToDictAndOut(&d.dict, d.dictPos, d.matchSrc, p[n:n+run])
+			d.remaining -= uint64(run)
+			d.matchLen -= run
+			n += run
+			continue
+		}
+
+		c, err := decodeMethod4LenStream(d.br)
+		if err != nil {
+			d.err = err
+			break
+		}
+		if c == 0 {
+			literal, err := d.br.getBitsFast(8)
+			if err != nil {
+				d.err = err
+				break
+			}
+			b := byte(literal)
+			d.dict[d.dictPos] = b
+			p[n] = b
+			n++
+			d.remaining--
+			d.dictPos = (d.dictPos + 1) & methodFDICMask
+			continue
+		}
+
+		j := c - 1 + methodThresh
+		if j <= 0 || uint64(j) > d.remaining {
+			d.err = ErrFormat
+			break
+		}
+		ptr, err := decodeMethod4PtrStream(d.br)
+		if err != nil {
+			d.err = err
+			break
+		}
+		if ptr >= methodFDIC {
+			d.err = ErrFormat
+			break
+		}
+		d.matchSrc = (d.dictPos - ptr - 1) & methodFDICMask
 		d.matchLen = j
 	}
 
@@ -943,6 +1341,266 @@ func (d *method123Decoder) readPtLen(nn, nbit, iSpecial int) error {
 }
 
 func (d *method123Decoder) readCLen() error {
+	nBits, err := d.br.getBits(methodCBIT)
+	if err != nil {
+		return err
+	}
+	n := int(nBits)
+	if n == 0 {
+		c, err := d.br.getBits(methodCBIT)
+		if err != nil {
+			return err
+		}
+		if int(c) >= methodNC {
+			return ErrFormat
+		}
+		for i := 0; i < methodNC; i++ {
+			d.cLen[i] = 0
+		}
+		for i := 0; i < methodCTable; i++ {
+			d.cTable[i] = c
+		}
+		return nil
+	}
+
+	i := 0
+	for i < n {
+		peek, err := d.br.peekBits(methodCodeBit)
+		if err != nil {
+			return err
+		}
+		c := int(d.ptTable[peek>>8])
+		if c >= methodNT {
+			mask := uint16(1 << 7)
+			for steps := 0; c >= methodNT; steps++ {
+				if steps > len(d.left) || c < 0 || c >= len(d.left) {
+					return ErrFormat
+				}
+				if peek&mask != 0 {
+					c = int(d.right[c])
+				} else {
+					c = int(d.left[c])
+				}
+				mask >>= 1
+			}
+		}
+		if c < 0 || c >= len(d.ptLen) {
+			return ErrFormat
+		}
+		if err := d.br.fillBuf(int(d.ptLen[c])); err != nil {
+			return err
+		}
+		if c <= 2 {
+			switch c {
+			case 0:
+				c = 1
+			case 1:
+				bits, err := d.br.getBits(4)
+				if err != nil {
+					return err
+				}
+				c = int(bits) + 3
+			case 2:
+				bits, err := d.br.getBits(methodCBIT)
+				if err != nil {
+					return err
+				}
+				c = int(bits) + 20
+			}
+			for c > 0 {
+				if i >= methodNC {
+					return ErrFormat
+				}
+				d.cLen[i] = 0
+				i++
+				c--
+			}
+		} else {
+			if i >= methodNC {
+				return ErrFormat
+			}
+			d.cLen[i] = uint8(c - 2)
+			i++
+		}
+	}
+	for i < methodNC {
+		d.cLen[i] = 0
+		i++
+	}
+	return makeDecodeTable(methodNC, d.cLen[:], 12, d.cTable[:], methodCTable, d.left[:], d.right[:])
+}
+
+func (d *method123BitStreamDecoder) decodeC() (int, error) {
+	if d.blockSize == 0 {
+		blockSize, err := d.br.getBits(methodCodeBit)
+		if err != nil {
+			return 0, err
+		}
+		d.blockSize = int(blockSize)
+		if d.blockSize == 0 {
+			return 0, ErrFormat
+		}
+		if err := d.readPtLen(methodNT, methodTBIT, 3); err != nil {
+			return 0, err
+		}
+		if err := d.readCLen(); err != nil {
+			return 0, err
+		}
+		if err := d.readPtLen(methodNP, methodPBIT, -1); err != nil {
+			return 0, err
+		}
+	}
+	if d.blockSize < 0 {
+		return 0, ErrFormat
+	}
+	d.blockSize--
+
+	peek, err := d.br.peekBits(methodCodeBit)
+	if err != nil {
+		return 0, err
+	}
+	j := int(d.cTable[peek>>4])
+	if j >= methodNC {
+		mask := uint16(1 << 3)
+		for steps := 0; j >= methodNC; steps++ {
+			if steps > len(d.left) || j < 0 || j >= len(d.left) {
+				return 0, ErrFormat
+			}
+			if peek&mask != 0 {
+				j = int(d.right[j])
+			} else {
+				j = int(d.left[j])
+			}
+			mask >>= 1
+		}
+	}
+	if j < 0 || j >= len(d.cLen) {
+		return 0, ErrFormat
+	}
+	if err := d.br.fillBuf(int(d.cLen[j])); err != nil {
+		return 0, err
+	}
+	return j, nil
+}
+
+func (d *method123BitStreamDecoder) decodeP() (int, error) {
+	peek, err := d.br.peekBits(methodCodeBit)
+	if err != nil {
+		return 0, err
+	}
+	j := int(d.ptTable[peek>>8])
+	if j >= methodNP {
+		mask := uint16(1 << 7)
+		for steps := 0; j >= methodNP; steps++ {
+			if steps > len(d.left) || j < 0 || j >= len(d.left) {
+				return 0, ErrFormat
+			}
+			if peek&mask != 0 {
+				j = int(d.right[j])
+			} else {
+				j = int(d.left[j])
+			}
+			mask >>= 1
+		}
+	}
+	if j < 0 || j >= len(d.ptLen) {
+		return 0, ErrFormat
+	}
+	if err := d.br.fillBuf(int(d.ptLen[j])); err != nil {
+		return 0, err
+	}
+	if j != 0 {
+		j--
+		if j > methodCodeBit {
+			return 0, ErrFormat
+		}
+		extra, err := d.br.getBits(j)
+		if err != nil {
+			return 0, err
+		}
+		j = (1 << j) + int(extra)
+	}
+	return j, nil
+}
+
+func (d *method123BitStreamDecoder) readPtLen(nn, nbit, iSpecial int) error {
+	nBits, err := d.br.getBits(nbit)
+	if err != nil {
+		return err
+	}
+	n := int(nBits)
+	if n == 0 {
+		c, err := d.br.getBits(nbit)
+		if err != nil {
+			return err
+		}
+		if int(c) >= nn {
+			return ErrFormat
+		}
+		for i := 0; i < nn; i++ {
+			d.ptLen[i] = 0
+		}
+		for i := 0; i < methodPTable; i++ {
+			d.ptTable[i] = c
+		}
+		return nil
+	}
+
+	i := 0
+	if n >= methodNPT {
+		n = methodNPT
+	}
+	for i < n {
+		peek, err := d.br.peekBits(methodCodeBit)
+		if err != nil {
+			return err
+		}
+		c := int(peek >> 13)
+		if c == 7 {
+			mask := uint16(1 << 12)
+			for mask&peek != 0 {
+				mask >>= 1
+				c++
+			}
+		}
+		if c < 7 {
+			if err := d.br.fillBuf(3); err != nil {
+				return err
+			}
+		} else {
+			if err := d.br.fillBuf(c - 3); err != nil {
+				return err
+			}
+		}
+		if i >= nn {
+			return ErrFormat
+		}
+		d.ptLen[i] = uint8(c)
+		i++
+		if i == iSpecial {
+			v, err := d.br.getBits(2)
+			if err != nil {
+				return err
+			}
+			c = int(v)
+			for c > 0 {
+				if i >= nn {
+					return ErrFormat
+				}
+				d.ptLen[i] = 0
+				i++
+				c--
+			}
+		}
+	}
+	for i < nn {
+		d.ptLen[i] = 0
+		i++
+	}
+	return makeDecodeTable(nn, d.ptLen[:], 8, d.ptTable[:], methodPTable, d.left[:], d.right[:])
+}
+
+func (d *method123BitStreamDecoder) readCLen() error {
 	nBits, err := d.br.getBits(methodCBIT)
 	if err != nil {
 		return err
@@ -1268,6 +1926,16 @@ func method14LowBitMask32(n int) uint32 {
 	return (uint32(1) << n) - 1
 }
 
+func method14LowBitMask64(n int) uint64 {
+	if n <= 0 {
+		return 0
+	}
+	if n >= 64 {
+		return ^uint64(0)
+	}
+	return (uint64(1) << n) - 1
+}
+
 func (br *arjBitStreamReader) fillLookahead(n int) error {
 	if n <= 0 {
 		return nil
@@ -1276,17 +1944,15 @@ func (br *arjBitStreamReader) fillLookahead(n int) error {
 		return br.err
 	}
 	for int(br.bitCount) < n && br.remaining > 0 {
-		needBytes := (n - int(br.bitCount) + 7) / 8
-		roomBytes := (32 - int(br.bitCount)) / 8
+		roomBytes := (64 - int(br.bitCount)) / 8
 		if roomBytes <= 0 {
 			br.err = ErrFormat
 			return br.err
 		}
 
-		readN := needBytes
-		if readN > roomBytes {
-			readN = roomBytes
-		}
+		// Pull as much as fits in the bit window to amortize io.ReadFull call
+		// overhead for frequent 1-bit/8-bit decode reads.
+		readN := roomBytes
 		if readN > len(br.scratch) {
 			readN = len(br.scratch)
 		}
@@ -1297,6 +1963,12 @@ func (br *arjBitStreamReader) fillLookahead(n int) error {
 			break
 		}
 
+		// Only unread low bits are meaningful; trim once per refill instead of
+		// per-bit in fast decode paths.
+		if br.bitCount > 0 {
+			br.bitBuf &= method14LowBitMask64(int(br.bitCount))
+		}
+
 		if _, err := io.ReadFull(br.r, br.scratch[:readN]); err != nil {
 			br.err = ErrFormat
 			return br.err
@@ -1304,7 +1976,7 @@ func (br *arjBitStreamReader) fillLookahead(n int) error {
 		br.remaining -= int64(readN)
 		for i := 0; i < readN; i++ {
 			br.bitBuf <<= 8
-			br.bitBuf |= uint32(br.scratch[i])
+			br.bitBuf |= uint64(br.scratch[i])
 			br.bitCount += 8
 		}
 	}
@@ -1325,12 +1997,12 @@ func (br *arjBitStreamReader) peekBits(n int) (uint16, error) {
 
 	if int(br.bitCount) >= n {
 		shift := int(br.bitCount) - n
-		return uint16((br.bitBuf >> shift) & method14LowBitMask32(n)), nil
+		return uint16((br.bitBuf >> shift) & method14LowMask16[n]), nil
 	}
 	if br.bitCount == 0 {
 		return 0, nil
 	}
-	return uint16((br.bitBuf << (n - int(br.bitCount))) & method14LowBitMask32(n)), nil
+	return uint16((br.bitBuf << (n - int(br.bitCount))) & method14LowMask16[n]), nil
 }
 
 func (br *arjBitStreamReader) fillBuf(n int) error {
@@ -1357,7 +2029,7 @@ func (br *arjBitStreamReader) fillBuf(n int) error {
 	if br.bitCount == 0 {
 		br.bitBuf = 0
 	} else {
-		br.bitBuf &= method14LowBitMask32(int(br.bitCount))
+		br.bitBuf &= method14LowBitMask64(int(br.bitCount))
 	}
 	return nil
 }
@@ -1382,13 +2054,62 @@ func (br *arjBitStreamReader) getBits(n int) (uint16, error) {
 		return 0, br.err
 	}
 	shift := int(br.bitCount) - n
-	v := uint16((br.bitBuf >> shift) & method14LowBitMask32(n))
+	v := uint16((br.bitBuf >> shift) & method14LowMask16[n])
 	br.bitCount -= uint8(n)
 	br.bitPos = nextPos
 	if br.bitCount == 0 {
 		br.bitBuf = 0
 	} else {
-		br.bitBuf &= method14LowBitMask32(int(br.bitCount))
+		br.bitBuf &= method14LowBitMask64(int(br.bitCount))
+	}
+	return v, nil
+}
+
+func (br *arjBitStreamReader) getBitsFast(n int) (uint16, error) {
+	if n <= 0 || n > methodCodeBit {
+		br.err = ErrFormat
+		return 0, br.err
+	}
+	if br.err != nil {
+		return 0, br.err
+	}
+	if int(br.bitCount) < n {
+		if err := br.fillLookahead(n); err != nil {
+			return 0, err
+		}
+		if int(br.bitCount) < n {
+			br.err = ErrFormat
+			return 0, br.err
+		}
+	}
+	shift := int(br.bitCount) - n
+	v := uint16((br.bitBuf >> shift) & method14LowMask16[n])
+	br.bitCount -= uint8(n)
+	br.bitPos += uint64(n)
+	if br.bitCount == 0 {
+		br.bitBuf = 0
+	}
+	return v, nil
+}
+
+func (br *arjBitStreamReader) getBitFast() (uint16, error) {
+	if br.err != nil {
+		return 0, br.err
+	}
+	if br.bitCount == 0 {
+		if err := br.fillLookahead(1); err != nil {
+			return 0, err
+		}
+		if br.bitCount == 0 {
+			br.err = ErrFormat
+			return 0, br.err
+		}
+	}
+	br.bitCount--
+	br.bitPos++
+	v := uint16((br.bitBuf >> br.bitCount) & 1)
+	if br.bitCount == 0 {
+		br.bitBuf = 0
 	}
 	return v, nil
 }

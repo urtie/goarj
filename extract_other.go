@@ -189,7 +189,7 @@ func extractOneFilePath(root, path, name string, f *File, quota *extractQuota) (
 		}
 	}()
 
-	if _, err := io.Copy(&extractQuotaWriter{dst: tmp, quota: quota}, rc); err != nil {
+	if _, err := copyExtractData(&extractQuotaWriter{dst: tmp, quota: quota}, rc); err != nil {
 		return err
 	}
 
@@ -251,7 +251,7 @@ func extractOneStreamFilePath(root, path, name string, h *FileHeader, rc io.Read
 		}
 	}()
 
-	if _, err := io.Copy(&extractQuotaWriter{dst: tmp, quota: quota}, rc); err != nil {
+	if _, err := copyExtractData(&extractQuotaWriter{dst: tmp, quota: quota}, rc); err != nil {
 		return err
 	}
 	if err := rc.Close(); err != nil {
