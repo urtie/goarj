@@ -2,8 +2,6 @@
 
 `goarj` is a pure Go package for reading and writing ARJ archives, with no cgo dependency.
 
-> Note: ARJ is old, so we're still dealing with 32-bit file-size limits, and because the format is not streaming, very large archives loves to eat memory.
-
 It tries to feel close to `archive/zip`, so most of the flow is familiar:
 `NewWriter` -> `Create` -> write bytes -> `Close`, and `NewReader`/`OpenReader` on the read side.
 
