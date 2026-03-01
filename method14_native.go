@@ -86,7 +86,7 @@ type arjBitStreamReader struct {
 	bitBuf    uint32
 	bitCount  uint8
 	err       error
-	scratch   [1]byte
+	scratch   [8]byte
 }
 
 type method123Decoder struct {
@@ -566,6 +566,30 @@ func (d *method123StreamDecoder) Read(p []byte) (int, error) {
 	n := 0
 	for n < len(p) && d.remaining > 0 {
 		if d.matchLen > 0 {
+			run := d.matchLen
+			if maxOut := len(p) - n; run > maxOut {
+				run = maxOut
+			}
+			if maxRemain := int(d.remaining); run > maxRemain {
+				run = maxRemain
+			}
+			if run > 0 && method14CanFastMatchCopy(d.matchSrc, d.dictPos, run, methodDICSize) {
+				copy(d.dict[d.dictPos:d.dictPos+run], d.dict[d.matchSrc:d.matchSrc+run])
+				copy(p[n:n+run], d.dict[d.matchSrc:d.matchSrc+run])
+				d.remaining -= uint64(run)
+				d.matchLen -= run
+				n += run
+				d.dictPos += run
+				d.matchSrc += run
+				if d.dictPos >= methodDICSize {
+					d.dictPos -= methodDICSize
+				}
+				if d.matchSrc >= methodDICSize {
+					d.matchSrc -= methodDICSize
+				}
+				continue
+			}
+
 			b := d.dict[d.matchSrc]
 			d.dict[d.dictPos] = b
 			p[n] = b
@@ -651,6 +675,30 @@ func (d *method4StreamDecoder) Read(p []byte) (int, error) {
 	n := 0
 	for n < len(p) && d.remaining > 0 {
 		if d.matchLen > 0 {
+			run := d.matchLen
+			if maxOut := len(p) - n; run > maxOut {
+				run = maxOut
+			}
+			if maxRemain := int(d.remaining); run > maxRemain {
+				run = maxRemain
+			}
+			if run > 0 && method14CanFastMatchCopy(d.matchSrc, d.dictPos, run, methodFDIC) {
+				copy(d.dict[d.dictPos:d.dictPos+run], d.dict[d.matchSrc:d.matchSrc+run])
+				copy(p[n:n+run], d.dict[d.matchSrc:d.matchSrc+run])
+				d.remaining -= uint64(run)
+				d.matchLen -= run
+				n += run
+				d.dictPos += run
+				d.matchSrc += run
+				if d.dictPos >= methodFDIC {
+					d.dictPos -= methodFDIC
+				}
+				if d.matchSrc >= methodFDIC {
+					d.matchSrc -= methodFDIC
+				}
+				continue
+			}
+
 			b := d.dict[d.matchSrc]
 			d.dict[d.dictPos] = b
 			p[n] = b
@@ -1225,14 +1273,37 @@ func (br *arjBitStreamReader) fillLookahead(n int) error {
 		return br.err
 	}
 	for int(br.bitCount) < n && br.remaining > 0 {
-		if _, err := io.ReadFull(br.r, br.scratch[:]); err != nil {
+		needBytes := (n - int(br.bitCount) + 7) / 8
+		roomBytes := (32 - int(br.bitCount)) / 8
+		if roomBytes <= 0 {
 			br.err = ErrFormat
 			return br.err
 		}
-		br.remaining--
-		br.bitBuf <<= 8
-		br.bitBuf |= uint32(br.scratch[0])
-		br.bitCount += 8
+
+		readN := needBytes
+		if readN > roomBytes {
+			readN = roomBytes
+		}
+		if readN > len(br.scratch) {
+			readN = len(br.scratch)
+		}
+		if remaining := int(br.remaining); readN > remaining {
+			readN = remaining
+		}
+		if readN <= 0 {
+			break
+		}
+
+		if _, err := io.ReadFull(br.r, br.scratch[:readN]); err != nil {
+			br.err = ErrFormat
+			return br.err
+		}
+		br.remaining -= int64(readN)
+		for i := 0; i < readN; i++ {
+			br.bitBuf <<= 8
+			br.bitBuf |= uint32(br.scratch[i])
+			br.bitCount += 8
+		}
 	}
 	return nil
 }
