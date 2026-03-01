@@ -752,6 +752,7 @@ func findMainHeaderOffsetWithBudgetAndLimits(r io.ReaderAt, size int64, budget *
 
 	buf := mainHeaderScanBufPool.Get().([]byte)
 	defer mainHeaderScanBufPool.Put(buf)
+	signature := [2]byte{arjHeaderID1, arjHeaderID2}
 
 	var (
 		prevLast byte
@@ -788,28 +789,26 @@ func findMainHeaderOffsetWithBudgetAndLimits(r io.ReaderAt, size int64, budget *
 
 		limit := len(chunk) - 1
 		for i := 0; i < limit; {
-			next := bytes.IndexByte(chunk[i:limit], arjHeaderID1)
+			next := bytes.Index(chunk[i:], signature[:])
 			if next < 0 {
 				break
 			}
 			pos := i + next
-			if chunk[pos+1] == arjHeaderID2 {
-				candidateOff := off + int64(pos)
-				if pos+3 < len(chunk) {
-					basicSize := int(binary.LittleEndian.Uint16(chunk[pos+2 : pos+4]))
-					if !mainHeaderCandidateBasicSizePassesPrefilter(size, candidateOff, basicSize) {
-						i = pos + 1
-						continue
-					}
+			candidateOff := off + int64(pos)
+			if pos+3 < len(chunk) {
+				basicSize := int(binary.LittleEndian.Uint16(chunk[pos+2 : pos+4]))
+				if !mainHeaderCandidateBasicSizePassesPrefilter(size, candidateOff, basicSize) {
+					i = pos + 1
+					continue
 				}
-				files, end, ok, probeErr := probeArchiveLayoutWithLimits(probeReader, size, candidateOff, limits)
-				if probeErr != nil {
-					return 0, normalizeMainHeaderProbeError(probeErr)
-				}
-				if ok && (!found || files > best.files || (files == best.files && end > best.end)) {
-					best = headerCandidate{off: candidateOff, files: files, end: end}
-					found = true
-				}
+			}
+			files, end, ok, probeErr := probeArchiveLayoutWithLimits(probeReader, size, candidateOff, limits)
+			if probeErr != nil {
+				return 0, normalizeMainHeaderProbeError(probeErr)
+			}
+			if ok && (!found || files > best.files || (files == best.files && end > best.end)) {
+				best = headerCandidate{off: candidateOff, files: files, end: end}
+				found = true
 			}
 			i = pos + 1
 		}
