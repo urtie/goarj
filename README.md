@@ -28,7 +28,7 @@ import (
 	"io"
 	"log"
 
-	arj "goarj"
+	arj "github.com/urtie/goarj"
 )
 
 func main() {
@@ -61,7 +61,7 @@ import (
 	"io"
 	"log"
 
-	arj "goarj"
+	arj "github.com/urtie/goarj"
 )
 
 func main() {
@@ -93,7 +93,7 @@ package main
 import (
 	"log"
 
-	arj "goarj"
+	arj "github.com/urtie/goarj"
 )
 
 func main() {
@@ -120,7 +120,7 @@ import (
 	"log"
 	"os"
 
-	arj "goarj"
+	arj "github.com/urtie/goarj"
 )
 
 func main() {
