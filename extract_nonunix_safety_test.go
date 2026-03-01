@@ -484,6 +484,68 @@ func TestNonUnixExtractAllRejectsSwappedDestinationAfterDirectRename(t *testing.
 	}
 }
 
+func TestNonUnixExtractAllRollbackRemovesCommittedFileAfterParentSymlinkSwap(t *testing.T) {
+	tmp := t.TempDir()
+	archivePath := filepath.Join(tmp, "post-rename-parent-symlink-swap-rollback.arj")
+	entryName := "docs/note.txt"
+	nonUnixWriteExtractArchive(t, archivePath, []nonUnixExtractEntry{
+		{
+			header:  nonUnixBuildExtractHeader(entryName, 0o640, time.Date(2024, time.May, 16, 3, 2, 3, 0, time.UTC)),
+			payload: []byte("replacement"),
+		},
+	})
+
+	r, err := OpenReader(archivePath)
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer r.Close()
+
+	out := filepath.Join(tmp, "out")
+	if err := os.MkdirAll(filepath.Join(out, "docs"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(out/docs): %v", err)
+	}
+	outside := filepath.Join(tmp, "outside")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatalf("MkdirAll(outside): %v", err)
+	}
+
+	prevHook := extractTestHookAfterNonUnixCommitRename
+	extractTestHookAfterNonUnixCommitRename = func(name, destination string) error {
+		if name != entryName {
+			return nil
+		}
+
+		parentPath := filepath.Join(out, "docs")
+		parkedParent := filepath.Join(out, "docs.parked")
+		if err := os.Rename(parentPath, parkedParent); err != nil {
+			t.Fatalf("Rename(parent -> parked): %v", err)
+		}
+		nonUnixSymlinkOrSkip(t, outside, parentPath)
+
+		parkedCommitted := filepath.Join(parkedParent, "note.txt")
+		outsideCommitted := filepath.Join(outside, "note.txt")
+		if err := os.Rename(parkedCommitted, outsideCommitted); err != nil {
+			t.Fatalf("Rename(committed -> outside): %v", err)
+		}
+		if err := os.RemoveAll(parkedParent); err != nil {
+			t.Fatalf("RemoveAll(parked parent): %v", err)
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		extractTestHookAfterNonUnixCommitRename = prevHook
+	})
+
+	err = r.ExtractAll(out)
+	assertNonUnixExtractInsecurePathError(t, err, entryName)
+
+	outsideCommitted := filepath.Join(outside, "note.txt")
+	if _, statErr := os.Stat(outsideCommitted); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("outside committed file exists or stat failed: %v", statErr)
+	}
+}
+
 func TestNonUnixExtractAllRenameFallbackLateFailureRestoresDestination(t *testing.T) {
 	tmp := t.TempDir()
 	archivePath := filepath.Join(tmp, "rename-fallback-late-failure-restore.arj")

@@ -412,10 +412,7 @@ func verifyPostCommitExtractPath(root, path, name string, stagedInfo fs.FileInfo
 	return nil
 }
 
-func rollbackPostCommitExtractPath(root, path, name string, stagedInfo fs.FileInfo) error {
-	if err := ensureNoSymlinkComponents(root, path, name, true); err != nil {
-		return err
-	}
+func rollbackPostCommitExtractPath(_ string, path, name string, stagedInfo fs.FileInfo) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -429,8 +426,8 @@ func rollbackPostCommitExtractPath(root, path, name string, stagedInfo fs.FileIn
 	if !info.Mode().IsRegular() {
 		return insecureExtractPathError(name)
 	}
-	if stagedInfo != nil && os.SameFile(stagedInfo, info) {
-		return nil
+	if stagedInfo != nil && !os.SameFile(stagedInfo, info) {
+		return insecureExtractPathError(name)
 	}
 	if err := os.Remove(path); err != nil {
 		return extractPathError(path, err)
