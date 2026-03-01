@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	goarj "goarj"
+	goarj "github.com/urtie/goarj"
 )
 
 func TestResolveARJPathExplicit(t *testing.T) {

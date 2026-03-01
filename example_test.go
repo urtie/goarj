@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	arj "goarj"
+	arj "github.com/urtie/goarj"
 )
 
 func ExampleNewWriter() {

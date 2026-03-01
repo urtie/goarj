@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	goarj "goarj"
+	goarj "github.com/urtie/goarj"
 )
 
 var fixtureTimestamp = time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC)
