@@ -2,6 +2,7 @@ package arj
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -496,5 +497,385 @@ func benchmarkWriteVolumeArchive(b *testing.B, path string, entries []benchmarkV
 	}
 	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
 		b.Fatalf("WriteFile(%s): %v", path, err)
+	}
+}
+
+type benchmarkCorpusFile struct {
+	name    string
+	method  uint16
+	payload []byte
+}
+
+func benchmarkArchiveFromFiles(b *testing.B, files []benchmarkCorpusFile) []byte {
+	b.Helper()
+
+	var archive bytes.Buffer
+	w := NewWriter(&archive)
+	for _, file := range files {
+		fw, err := w.CreateHeader(&FileHeader{
+			Name:     file.name,
+			Method:   file.method,
+			Modified: benchmarkModifiedTime,
+		})
+		if err != nil {
+			b.Fatalf("CreateHeader(%s): %v", file.name, err)
+		}
+		if _, err := fw.Write(file.payload); err != nil {
+			b.Fatalf("Write(%s): %v", file.name, err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		b.Fatalf("Close writer: %v", err)
+	}
+	return append([]byte(nil), archive.Bytes()...)
+}
+
+func benchmarkHighEntropyPayload(size int) []byte {
+	out := make([]byte, size)
+	var x uint64 = 0x9e3779b97f4a7c15
+	for i := range out {
+		x ^= x << 13
+		x ^= x >> 7
+		x ^= x << 17
+		out[i] = byte(x)
+	}
+	return out
+}
+
+func benchmarkReaderDecodeCorpus(b *testing.B, files []benchmarkCorpusFile) {
+	b.Helper()
+	archive := benchmarkArchiveFromFiles(b, files)
+	var total int64
+	for _, file := range files {
+		total += int64(len(file.payload))
+	}
+
+	b.ReportAllocs()
+	b.SetBytes(total)
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		r, err := NewReader(bytes.NewReader(archive), int64(len(archive)))
+		if err != nil {
+			b.Fatalf("NewReader: %v", err)
+		}
+		var copied int64
+		for _, f := range r.File {
+			rc, err := f.Open()
+			if err != nil {
+				b.Fatalf("Open(%s): %v", f.Name, err)
+			}
+			n, err := io.Copy(io.Discard, rc)
+			closeErr := rc.Close()
+			if err != nil {
+				b.Fatalf("Read(%s): %v", f.Name, err)
+			}
+			if closeErr != nil {
+				b.Fatalf("Close(%s): %v", f.Name, closeErr)
+			}
+			copied += n
+		}
+		if copied != total {
+			b.Fatalf("decoded bytes = %d, want %d", copied, total)
+		}
+	}
+}
+
+func BenchmarkReaderDecodeCorpus(b *testing.B) {
+	const oneMiB = 1 << 20
+	cases := []struct {
+		name  string
+		files []benchmarkCorpusFile
+	}{
+		{
+			name: "entropy_1MiB",
+			files: []benchmarkCorpusFile{
+				{name: "entropy.bin", method: Method1, payload: benchmarkHighEntropyPayload(oneMiB)},
+			},
+		},
+		{
+			name: "repetitive_1MiB",
+			files: []benchmarkCorpusFile{
+				{name: "repeat.bin", method: Method1, payload: bytes.Repeat([]byte("goarj-repeat-pattern-"), oneMiB/len("goarj-repeat-pattern-"))},
+			},
+		},
+		{
+			name: "many_small_1000x1KiB",
+			files: func() []benchmarkCorpusFile {
+				files := make([]benchmarkCorpusFile, 1000)
+				for i := range files {
+					files[i] = benchmarkCorpusFile{
+						name:    fmt.Sprintf("tiny/%04d.bin", i),
+						method:  Method1,
+						payload: benchmarkPayload(1 << 10),
+					}
+				}
+				return files
+			}(),
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		b.Run(tc.name, func(b *testing.B) {
+			benchmarkReaderDecodeCorpus(b, tc.files)
+		})
+	}
+}
+
+func BenchmarkWriterEncodeCorpus(b *testing.B) {
+	const oneMiB = 1 << 20
+	cases := []struct {
+		name  string
+		files []benchmarkCorpusFile
+	}{
+		{
+			name: "entropy_1MiB",
+			files: []benchmarkCorpusFile{
+				{name: "entropy.bin", method: Method1, payload: benchmarkHighEntropyPayload(oneMiB)},
+			},
+		},
+		{
+			name: "repetitive_1MiB",
+			files: []benchmarkCorpusFile{
+				{name: "repeat.bin", method: Method1, payload: bytes.Repeat([]byte("goarj-repeat-pattern-"), oneMiB/len("goarj-repeat-pattern-"))},
+			},
+		},
+		{
+			name: "many_small_1000x1KiB",
+			files: func() []benchmarkCorpusFile {
+				files := make([]benchmarkCorpusFile, 1000)
+				for i := range files {
+					files[i] = benchmarkCorpusFile{
+						name:    fmt.Sprintf("tiny/%04d.bin", i),
+						method:  Method1,
+						payload: benchmarkPayload(1 << 10),
+					}
+				}
+				return files
+			}(),
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		b.Run(tc.name, func(b *testing.B) {
+			var total int64
+			for _, file := range tc.files {
+				total += int64(len(file.payload))
+			}
+
+			b.ReportAllocs()
+			b.SetBytes(total)
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				_ = benchmarkArchiveFromFiles(b, tc.files)
+			}
+		})
+	}
+}
+
+func BenchmarkOpenMultiReaderContinuationManyVolumes(b *testing.B) {
+	payload := benchmarkPayload(2 << 20)
+	cases := []int{8, 32, 128}
+
+	for _, parts := range cases {
+		parts := parts
+		b.Run(fmt.Sprintf("%d_parts", parts), func(b *testing.B) {
+			tmp := b.TempDir()
+			base := filepath.Join(tmp, "many")
+			partSize := len(payload) / parts
+			if partSize == 0 {
+				partSize = 1
+			}
+
+			for i := 0; i < parts; i++ {
+				ext := ".arj"
+				if i > 0 {
+					ext = fmt.Sprintf(".a%02d", i)
+				}
+				start := i * partSize
+				end := start + partSize
+				if i == parts-1 || end > len(payload) {
+					end = len(payload)
+				}
+				flags := uint8(0)
+				switch {
+				case parts == 1:
+				case i == 0:
+					flags = FlagVolume
+				case i == parts-1:
+					flags = FlagExtFile
+				default:
+					flags = FlagVolume | FlagExtFile
+				}
+				entries := []benchmarkVolumeEntry{
+					{name: "split.bin", flags: flags, payload: payload[start:end]},
+				}
+				if i%16 == 0 {
+					entries = append(entries, benchmarkVolumeEntry{
+						name:    fmt.Sprintf("meta/%03d.txt", i),
+						payload: []byte("sidecar"),
+					})
+				}
+				benchmarkWriteVolumeArchive(b, base+ext, entries)
+			}
+
+			b.ReportAllocs()
+			b.SetBytes(int64(len(payload)))
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				mr, err := OpenMultiReader(base + ".arj")
+				if err != nil {
+					b.Fatalf("OpenMultiReader: %v", err)
+				}
+				rc, err := mr.File[0].Open()
+				if err != nil {
+					_ = mr.Close()
+					b.Fatalf("Open split file: %v", err)
+				}
+				n, err := io.Copy(io.Discard, rc)
+				closeErr := rc.Close()
+				multiCloseErr := mr.Close()
+				if err != nil {
+					b.Fatalf("Read split file: %v", err)
+				}
+				if closeErr != nil {
+					b.Fatalf("Close split file: %v", closeErr)
+				}
+				if multiCloseErr != nil {
+					b.Fatalf("Close multi reader: %v", multiCloseErr)
+				}
+				if n != int64(len(payload)) {
+					b.Fatalf("decoded bytes = %d, want %d", n, len(payload))
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkMultiVolumeWriterWriteEntrySplit(b *testing.B) {
+	payload := benchmarkPayload(768 << 10)
+	cases := []struct {
+		name       string
+		volumeSize int64
+		method     uint16
+	}{
+		{name: "store_64KiB", volumeSize: 64 << 10, method: Store},
+		{name: "store_256KiB", volumeSize: 256 << 10, method: Store},
+		{name: "method1_64KiB", volumeSize: 64 << 10, method: Method1},
+		{name: "method1_256KiB", volumeSize: 256 << 10, method: Method1},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		b.Run(tc.name, func(b *testing.B) {
+			tmp := b.TempDir()
+			b.ReportAllocs()
+			b.SetBytes(int64(len(payload)))
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				path := filepath.Join(tmp, fmt.Sprintf("split-%d.arj", i))
+				mw, err := NewMultiVolumeWriter(path, MultiVolumeWriterOptions{VolumeSize: tc.volumeSize})
+				if err != nil {
+					b.Fatalf("NewMultiVolumeWriter: %v", err)
+				}
+				fw, err := mw.CreateHeader(&FileHeader{Name: "payload.bin", Method: tc.method})
+				if err != nil {
+					b.Fatalf("CreateHeader: %v", err)
+				}
+				if _, err := fw.Write(payload); err != nil {
+					b.Fatalf("Write: %v", err)
+				}
+				if err := mw.Close(); err != nil {
+					b.Fatalf("Close: %v", err)
+				}
+				paths, err := VolumePaths(path)
+				if err != nil {
+					b.Fatalf("VolumePaths: %v", err)
+				}
+				for _, p := range paths {
+					_ = os.Remove(p)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkFindMainHeaderOffsetPrefixedScanLarge(b *testing.B) {
+	real := benchmarkArchiveBytes(b, Store, benchmarkPayload(4<<10))
+	decoy := benchmarkDecoyMainHeaderArchive(b, "decoy-empty.arj", true)
+	cases := []struct {
+		name string
+		size int
+	}{
+		{name: "dense_16MiB", size: 16 << 20},
+		{name: "dense_64MiB", size: 64 << 20},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		b.Run(tc.name, func(b *testing.B) {
+			prefix := benchmarkSignatureDenseNoise(tc.size)
+			container := make([]byte, 0, len(prefix)+len(decoy)+len(real))
+			container = append(container, prefix...)
+			container = append(container, decoy...)
+			container = append(container, real...)
+			size := int64(len(container))
+			want := int64(len(prefix) + len(decoy))
+
+			b.ReportAllocs()
+			b.SetBytes(size)
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				got, err := findMainHeaderOffset(bytes.NewReader(container), size)
+				if err != nil {
+					b.Fatalf("findMainHeaderOffset: %v", err)
+				}
+				if got != want {
+					b.Fatalf("findMainHeaderOffset = %d, want %d", got, want)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkNewStreamReaderPrefixedScanLarge(b *testing.B) {
+	real := benchmarkArchiveBytes(b, Store, benchmarkPayload(4<<10))
+	cases := []struct {
+		name string
+		size int
+	}{
+		{name: "dense_16MiB", size: 16 << 20},
+		{name: "dense_64MiB", size: 64 << 20},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		b.Run(tc.name, func(b *testing.B) {
+			prefix := benchmarkSignatureDenseNoise(tc.size)
+			container := make([]byte, 0, len(prefix)+len(real))
+			container = append(container, prefix...)
+			container = append(container, real...)
+			wantOffset := int64(len(prefix))
+
+			b.ReportAllocs()
+			b.SetBytes(int64(len(container)))
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				sr, err := NewStreamReader(bytes.NewReader(container))
+				if err != nil {
+					b.Fatalf("NewStreamReader: %v", err)
+				}
+				if got := sr.BaseOffset(); got != wantOffset {
+					b.Fatalf("BaseOffset = %d, want %d", got, wantOffset)
+				}
+			}
+		})
 	}
 }
