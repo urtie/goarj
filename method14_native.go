@@ -982,9 +982,9 @@ func (d *method123Decoder) readCLen() error {
 }
 
 func makeDecodeTable(nchar int, bitLen []uint8, tableBits int, table []uint16, tableSize int, left, right []uint16) error {
-	var count [17]uint16
-	var weight [17]uint16
-	var start [18]uint16
+	var count [17]uint32
+	var weight [17]uint32
+	var start [18]uint32
 
 	if nchar <= 0 || nchar > len(bitLen) {
 		return ErrFormat
@@ -1013,7 +1013,7 @@ func makeDecodeTable(nchar int, bitLen []uint8, tableBits int, table []uint16, t
 	for i := 1; i <= 16; i++ {
 		start[i+1] = start[i] + (count[i] << (16 - i))
 	}
-	if start[17] != 0 {
+	if start[17] != 1<<16 {
 		return ErrFormat
 	}
 
@@ -1042,18 +1042,18 @@ func makeDecodeTable(nchar int, bitLen []uint8, tableBits int, table []uint16, t
 	}
 
 	avail := nchar
-	mask := uint16(1 << (15 - tableBits))
+	mask := uint32(1 << (15 - tableBits))
 	for ch := 0; ch < nchar; ch++ {
 		ln := int(bitLen[ch])
 		if ln == 0 {
 			continue
 		}
 		k := start[ln]
-		nextCodeWide := uint32(k) + uint32(weight[ln])
+		nextCodeWide := k + weight[ln]
 		if nextCodeWide > 1<<16 {
 			return ErrFormat
 		}
-		nextCode := uint16(nextCodeWide)
+		nextCode := nextCodeWide
 		if ln <= tableBits {
 			if int(nextCode) > tableSize {
 				return ErrFormat

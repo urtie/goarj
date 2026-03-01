@@ -510,6 +510,18 @@ func TestMakeDecodeTableRejectsOversubscribedLengths(t *testing.T) {
 	}
 }
 
+func TestMakeDecodeTableRejectsOversubscribedLengthsModuloWrap(t *testing.T) {
+	bitLen := []uint8{1, 1, 1, 1}
+	table := make([]uint16, 2)
+	left := make([]uint16, 8)
+	right := make([]uint16, 8)
+
+	err := makeDecodeTable(4, bitLen, 1, table, len(table), left, right)
+	if !errors.Is(err, ErrFormat) {
+		t.Fatalf("makeDecodeTable modulo-wrap oversubscribed error = %v, want %v", err, ErrFormat)
+	}
+}
+
 func TestMakeDecodeTableAllowsTerminalCodeWrap(t *testing.T) {
 	// This bit-length set comes from a valid ARJ method-1 block and requires
 	// canonical code arithmetic to allow a terminal 65536 wrap.
