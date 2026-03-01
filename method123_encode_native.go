@@ -29,6 +29,14 @@ type method123BitEncoder struct {
 	bw *arjBitWriter
 }
 
+type method123HuffmanScratch struct {
+	heap     []int
+	nodeFreq []uint32
+	left     []int
+	right    []int
+	sort     []int
+}
+
 func encodeMethod123Native(plain []byte) []byte {
 	if len(plain) == 0 {
 		return nil
@@ -59,6 +67,7 @@ var (
 			return make([]method123Token, 0, method123BlockMaxTokens)
 		},
 	}
+	method123HuffmanScratchPool sync.Pool
 )
 
 func method123AcquireHead32() []int32 {
@@ -156,6 +165,48 @@ func method123ReleaseBlockTokens(tokens []method123Token) {
 		return
 	}
 	method123BlockTokenPool.Put(tokens[:0])
+}
+
+func method123AcquireHuffmanScratch(n int) *method123HuffmanScratch {
+	if n < 1 {
+		n = 1
+	}
+	var scratch *method123HuffmanScratch
+	if v := method123HuffmanScratchPool.Get(); v != nil {
+		scratch = v.(*method123HuffmanScratch)
+	} else {
+		scratch = &method123HuffmanScratch{}
+	}
+
+	if cap(scratch.heap) < n+1 {
+		scratch.heap = make([]int, n+1)
+	}
+	if cap(scratch.nodeFreq) < 2*n {
+		scratch.nodeFreq = make([]uint32, 2*n)
+	}
+	if cap(scratch.left) < 2*n {
+		scratch.left = make([]int, 2*n)
+	}
+	if cap(scratch.right) < 2*n {
+		scratch.right = make([]int, 2*n)
+	}
+	if cap(scratch.sort) < n {
+		scratch.sort = make([]int, 0, n)
+	}
+
+	scratch.heap = scratch.heap[:n+1]
+	scratch.nodeFreq = scratch.nodeFreq[:2*n]
+	scratch.left = scratch.left[:2*n]
+	scratch.right = scratch.right[:2*n]
+	scratch.sort = scratch.sort[:0]
+	return scratch
+}
+
+func method123ReleaseHuffmanScratch(s *method123HuffmanScratch) {
+	if s == nil {
+		return
+	}
+	method123HuffmanScratchPool.Put(s)
 }
 
 func (e *method123BitEncoder) writeBlock(tokens []method123Token) {
@@ -283,10 +334,13 @@ func method123BuildHuffman(freq []uint32) method123HuffmanTree {
 	lengths := make([]uint8, n)
 	codes := make([]uint16, n)
 
-	heap := make([]int, n+1)
-	nodeFreq := make([]uint32, 2*n)
-	left := make([]int, 2*n)
-	right := make([]int, 2*n)
+	scratch := method123AcquireHuffmanScratch(n)
+	defer method123ReleaseHuffmanScratch(scratch)
+
+	heap := scratch.heap
+	nodeFreq := scratch.nodeFreq
+	left := scratch.left
+	right := scratch.right
 
 	heapsize := 0
 	heap[1] = 0
@@ -331,7 +385,7 @@ func method123BuildHuffman(freq []uint32) method123HuffmanTree {
 		downheap(i)
 	}
 
-	sortOrder := make([]int, 0, n)
+	sortOrder := scratch.sort[:0]
 	avail := n
 	for heapsize > 1 {
 		i := heap[1]
