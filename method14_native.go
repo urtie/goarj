@@ -1,6 +1,7 @@
 package arj
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 )
@@ -173,7 +174,9 @@ func decompressorMethod14(method uint16) Decompressor {
 			return &method14ErrorReadCloser{err: err}
 		}
 
-		br := newARJBitStreamReader(ctx.Reader, ctx.compressedSize)
+		// Decode uses bit-level reads, so keep compressed input buffered to avoid
+		// tiny syscall-heavy reads from the underlying archive file.
+		br := newARJBitStreamReader(bufio.NewReaderSize(ctx.Reader, 64<<10), ctx.compressedSize)
 		switch method {
 		case Method1, Method2, Method3:
 			return &method14StreamingReadCloser{
