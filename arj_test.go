@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -244,6 +245,25 @@ func TestChecksumError(t *testing.T) {
 	_, err = io.ReadAll(rc)
 	if !errors.Is(err, ErrChecksum) {
 		t.Fatalf("ReadAll error = %v, want %v", err, ErrChecksum)
+	}
+}
+
+func TestFileHeaderModePreservesDirectoryTypeForTypeLessUnixMode(t *testing.T) {
+	h := FileHeader{
+		Name:     "docs/",
+		fileType: arjFileTypeDirectory,
+		fileMode: uint16(fileModeToUnixMode(0o750)),
+	}
+
+	got := h.Mode()
+	if got&fs.ModeDir == 0 {
+		t.Fatalf("Mode() = %v, want directory mode bit", got)
+	}
+	if got.Perm() != 0o750 {
+		t.Fatalf("Mode().Perm() = %v, want %v", got.Perm(), fs.FileMode(0o750))
+	}
+	if !h.FileInfo().IsDir() {
+		t.Fatalf("FileInfo().IsDir() = false, want true")
 	}
 }
 

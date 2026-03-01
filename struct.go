@@ -219,7 +219,11 @@ func (h *FileHeader) SetModTime(t time.Time) {
 // Mode returns permission and mode bits for the FileHeader.
 func (h *FileHeader) Mode() fs.FileMode {
 	if h.fileMode != 0 {
-		return unixModeToFileMode(uint32(h.fileMode))
+		mode := unixModeToFileMode(uint32(h.fileMode))
+		if h.isDir() && mode&fs.ModeDir == 0 {
+			mode |= fs.ModeDir
+		}
+		return mode
 	}
 	if h.isDir() {
 		return fs.ModeDir | 0o755
