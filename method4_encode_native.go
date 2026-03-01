@@ -276,15 +276,7 @@ func method4Hash3(a, b, c byte) int {
 }
 
 func method4MatchLen(plain []byte, left, right, maxLen int) int {
-	limit := len(plain) - right
-	if limit > maxLen {
-		limit = maxLen
-	}
-	n := 0
-	for n < limit && plain[left+n] == plain[right+n] {
-		n++
-	}
-	return n
+	return wideMatchLen(plain, left, right, maxLen)
 }
 
 // enc4Pass1 uses the same variable-width length coding as ARJ's enc4_pass1.

@@ -517,10 +517,7 @@ func method123TokenizeGreedyBlocks(plain []byte, emit func([]method123Token)) {
 				if maxLen > n-i {
 					maxLen = n - i
 				}
-				ml := methodThresh
-				for ml < maxLen && plain[candPos+ml] == plain[i+ml] {
-					ml++
-				}
+				ml := methodThresh + wideMatchLen(plain, candPos+methodThresh, i+methodThresh, maxLen-methodThresh)
 				if ml > bestLen {
 					bestLen = ml
 					bestDist = i - candPos
@@ -592,10 +589,7 @@ func method123TokenizeGreedyBlocksWide(plain []byte, emit func([]method123Token)
 				if maxLen > n-i {
 					maxLen = n - i
 				}
-				ml := methodThresh
-				for ml < maxLen && plain[cand+ml] == plain[i+ml] {
-					ml++
-				}
+				ml := methodThresh + wideMatchLen(plain, cand+methodThresh, i+methodThresh, maxLen-methodThresh)
 				if ml > bestLen {
 					bestLen = ml
 					bestDist = i - cand
