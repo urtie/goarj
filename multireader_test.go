@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -455,6 +456,32 @@ func TestOpenMultiReaderWithOptionsPassesReaderParserLimits(t *testing.T) {
 	})
 	if !errors.Is(err, ErrFormat) {
 		t.Fatalf("OpenMultiReaderWithOptions error = %v, want %v", err, ErrFormat)
+	}
+}
+
+func TestOpenMultiReaderWithOptionsEnforcesMergedLogicalEntryLimit(t *testing.T) {
+	tmp := t.TempDir()
+	base := filepath.Join(tmp, "merged-limit")
+
+	writeVolumeArchive(t, base+".arj", []volumeEntry{
+		{name: "split.bin", flags: FlagVolume, payload: []byte("left-")},
+		{name: "a.txt", payload: []byte("a")},
+	})
+	writeVolumeArchive(t, base+".a01", []volumeEntry{
+		{name: "split.bin", flags: FlagExtFile, payload: []byte("right")},
+		{name: "b.txt", payload: []byte("b")},
+	})
+
+	_, err := OpenMultiReaderWithOptions(base+".arj", MultiVolumeOptions{
+		ReaderOptions: ReaderOptions{
+			ParserLimits: ParserLimits{MaxEntries: 2},
+		},
+	})
+	if !errors.Is(err, ErrFormat) {
+		t.Fatalf("OpenMultiReaderWithOptions error = %v, want %v", err, ErrFormat)
+	}
+	if err == nil || !strings.Contains(err.Error(), "max entries exceeded") {
+		t.Fatalf("OpenMultiReaderWithOptions error = %v, want max entries exceeded", err)
 	}
 }
 

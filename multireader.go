@@ -115,6 +115,7 @@ func OpenMultiReaderWithOptions(name string, opts MultiVolumeOptions) (*MultiRea
 		closeOnError()
 		return nil, err
 	}
+	parserLimits := normalizeParserLimits(opts.ReaderOptions.ParserLimits)
 
 	cr, err := newConcatenatedReaderAt(volumeReaders, sizes)
 	if err != nil {
@@ -122,7 +123,7 @@ func OpenMultiReaderWithOptions(name string, opts MultiVolumeOptions) (*MultiRea
 		return nil, err
 	}
 
-	if err := mergeVolumeReaders(&rc.Reader, readers, cr.starts, cr); err != nil {
+	if err := mergeVolumeReaders(&rc.Reader, readers, cr.starts, cr, parserLimits.MaxEntries); err != nil {
 		closeOnError()
 		return nil, err
 	}
@@ -541,9 +542,12 @@ func normalizeVolumeArchiveName(name string) string {
 	return name
 }
 
-func mergeVolumeReaders(merged *Reader, volumes []*Reader, starts []int64, r io.ReaderAt) error {
+func mergeVolumeReaders(merged *Reader, volumes []*Reader, starts []int64, r io.ReaderAt, maxEntries int) error {
 	if merged == nil || len(volumes) == 0 || len(volumes) != len(starts) {
 		return ErrFormat
+	}
+	if maxEntries <= 0 {
+		maxEntries = normalizeParserLimits(ParserLimits{}).MaxEntries
 	}
 
 	merged.r = r
@@ -573,6 +577,9 @@ func mergeVolumeReaders(merged *Reader, volumes []*Reader, starts []int64, r io.
 			}
 
 			if sf.Flags&FlagExtFile == 0 {
+				if len(merged.File) >= maxEntries {
+					return parserEntryLimitError(maxEntries)
+				}
 				fh := cloneFileHeader(sf.FileHeader)
 				fh.Flags &^= FlagVolume | FlagExtFile
 				lf := &File{
