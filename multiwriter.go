@@ -1759,11 +1759,7 @@ func (w *MultiVolumeWriter) maxCompressedChunk(method uint16, plain []byte, maxC
 		return 0, nil, nil
 	}
 
-	buf := newEntryBuffer(uint64(len(plain)), bufferScopeMultiEntryPlain)
-	if _, err := buf.Write(plain); err != nil {
-		_ = buf.Close()
-		return 0, nil, err
-	}
+	buf := entryBufferFromByteSliceView(plain, bufferScopeMultiEntryPlain)
 	defer func() { _ = buf.Close() }()
 
 	comp := w.compressor(method)
@@ -1796,11 +1792,7 @@ func (w *MultiVolumeWriter) maxCompressedChunkWithCompressor(
 		return 0, nil, ErrAlgorithm
 	}
 
-	buf := newEntryBuffer(uint64(len(plain)), bufferScopeMultiEntryPlain)
-	if _, err := buf.Write(plain); err != nil {
-		_ = buf.Close()
-		return 0, nil, err
-	}
+	buf := entryBufferFromByteSliceView(plain, bufferScopeMultiEntryPlain)
 	defer func() { _ = buf.Close() }()
 
 	return w.maxCompressedChunkBufferedWithCompressor(
@@ -1812,6 +1804,16 @@ func (w *MultiVolumeWriter) maxCompressedChunkWithCompressor(
 		comp,
 		method14InputLimit,
 	)
+}
+
+func entryBufferFromByteSliceView(src []byte, scope string) *entryBuffer {
+	b := newEntryBuffer(uint64(len(src)), scope)
+	b.mem = *bytes.NewBuffer(src)
+	b.size = uint64(len(src))
+	if b.memLimit < b.size {
+		b.memLimit = b.size
+	}
+	return b
 }
 
 func (w *MultiVolumeWriter) maxCompressedChunkBuffered(method uint16, plain *entryBuffer, off int64, plainLen int, maxComp int64) (int, []byte, error) {
