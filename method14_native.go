@@ -611,12 +611,8 @@ func (d *method123StreamDecoder) Read(p []byte) (int, error) {
 			d.err = err
 			break
 		}
-		if ptr >= methodDICSize {
-			d.err = ErrFormat
-			break
-		}
 		d.matchSrc = d.dictPos - ptr - 1
-		if d.matchSrc < 0 {
+		for d.matchSrc < 0 {
 			d.matchSrc += methodDICSize
 		}
 		d.matchLen = j
@@ -832,7 +828,6 @@ func (d *method123Decoder) readPtLen(nn, nbit, iSpecial int) error {
 		if int(c) >= nn {
 			return ErrFormat
 		}
-		d.resetDecodeTree()
 		for i := 0; i < nn; i++ {
 			d.ptLen[i] = 0
 		}
@@ -893,7 +888,6 @@ func (d *method123Decoder) readPtLen(nn, nbit, iSpecial int) error {
 		d.ptLen[i] = 0
 		i++
 	}
-	d.resetDecodeTree()
 	return makeDecodeTable(nn, d.ptLen[:], 8, d.ptTable[:], methodPTable, d.left[:], d.right[:])
 }
 
@@ -911,7 +905,6 @@ func (d *method123Decoder) readCLen() error {
 		if int(c) >= methodNC {
 			return ErrFormat
 		}
-		d.resetDecodeTree()
 		for i := 0; i < methodNC; i++ {
 			d.cLen[i] = 0
 		}
@@ -985,7 +978,6 @@ func (d *method123Decoder) readCLen() error {
 		d.cLen[i] = 0
 		i++
 	}
-	d.resetDecodeTree()
 	return makeDecodeTable(methodNC, d.cLen[:], 12, d.cTable[:], methodCTable, d.left[:], d.right[:])
 }
 
@@ -1057,10 +1049,11 @@ func makeDecodeTable(nchar int, bitLen []uint8, tableBits int, table []uint16, t
 			continue
 		}
 		k := start[ln]
-		nextCode := k + weight[ln]
-		if nextCode < k {
+		nextCodeWide := uint32(k) + uint32(weight[ln])
+		if nextCodeWide > 1<<16 {
 			return ErrFormat
 		}
+		nextCode := uint16(nextCodeWide)
 		if ln <= tableBits {
 			if int(nextCode) > tableSize {
 				return ErrFormat
@@ -1101,13 +1094,6 @@ func makeDecodeTable(nchar int, bitLen []uint8, tableBits int, table []uint16, t
 		start[ln] = nextCode
 	}
 	return nil
-}
-
-func (d *method123Decoder) resetDecodeTree() {
-	for i := range d.left {
-		d.left[i] = 0
-		d.right[i] = 0
-	}
 }
 
 func newARJBitReader(data []byte) *arjBitReader {

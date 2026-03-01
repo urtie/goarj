@@ -510,6 +510,65 @@ func TestMakeDecodeTableRejectsOversubscribedLengths(t *testing.T) {
 	}
 }
 
+func TestMakeDecodeTableAllowsTerminalCodeWrap(t *testing.T) {
+	// This bit-length set comes from a valid ARJ method-1 block and requires
+	// canonical code arithmetic to allow a terminal 65536 wrap.
+	bitLen := []uint8{5, 5, 8, 0, 9, 9, 0, 8, 6, 5, 3, 2, 3, 3, 4, 4, 3, 8, 0}
+	table := make([]uint16, methodPTable)
+	left := make([]uint16, 2*methodNC-1)
+	right := make([]uint16, 2*methodNC-1)
+
+	if err := makeDecodeTable(methodNT, bitLen, 8, table, len(table), left, right); err != nil {
+		t.Fatalf("makeDecodeTable terminal wrap error = %v, want nil", err)
+	}
+}
+
+func TestReadPtLenSingleSymbolDoesNotResetDecodeTree(t *testing.T) {
+	var bw arjBitWriter
+	bw.putBits(methodPBIT, 0)
+	bw.putBits(methodPBIT, 1)
+
+	var d method123Decoder
+	d.br = newARJBitReader(bw.finishWithShutdownPadding())
+	const markerLeft = 777
+	const markerRight = 778
+	d.left[900] = markerLeft
+	d.right[900] = markerRight
+
+	if err := d.readPtLen(methodNP, methodPBIT, -1); err != nil {
+		t.Fatalf("readPtLen single-symbol error: %v", err)
+	}
+	if got := d.left[900]; got != markerLeft {
+		t.Fatalf("left marker = %d, want %d", got, markerLeft)
+	}
+	if got := d.right[900]; got != markerRight {
+		t.Fatalf("right marker = %d, want %d", got, markerRight)
+	}
+}
+
+func TestReadCLenSingleSymbolDoesNotResetDecodeTree(t *testing.T) {
+	var bw arjBitWriter
+	bw.putBits(methodCBIT, 0)
+	bw.putBits(methodCBIT, 1)
+
+	var d method123Decoder
+	d.br = newARJBitReader(bw.finishWithShutdownPadding())
+	const markerLeft = 801
+	const markerRight = 802
+	d.left[900] = markerLeft
+	d.right[900] = markerRight
+
+	if err := d.readCLen(); err != nil {
+		t.Fatalf("readCLen single-symbol error: %v", err)
+	}
+	if got := d.left[900]; got != markerLeft {
+		t.Fatalf("left marker = %d, want %d", got, markerLeft)
+	}
+	if got := d.right[900]; got != markerRight {
+		t.Fatalf("right marker = %d, want %d", got, markerRight)
+	}
+}
+
 type nilErrShortWriter struct {
 	maxBytes int
 }

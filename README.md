@@ -16,6 +16,23 @@ It tries to feel close to `archive/zip`, so most of the flow is familiar:
 - Multi-volume support for both split reads and writes (`OpenMultiReader`, `NewMultiVolumeWriter`).
 - Add whole directory trees with `AddFS`.
 
+## CLI
+
+A minimal command-line tool is available at `cmd/goarj`.
+It archives file entries using ARJ `Method4` compression, and is just meant for testing.
+
+Archive a file or directory:
+
+```sh
+go run ./cmd/goarj archive backup.arj ./data
+```
+
+Extract an archive:
+
+```sh
+go run ./cmd/goarj extract backup.arj ./out
+```
+
 ## Quick usage
 
 ### Write an archive
