@@ -550,6 +550,8 @@ func (w *Writer) AddFS(fsys fs.FS) error {
 		h.Name = name
 		if d.IsDir() {
 			h.Name += "/"
+		} else {
+			h.Method = Method1
 		}
 
 		fw, err := w.CreateHeader(h)

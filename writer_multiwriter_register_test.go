@@ -340,9 +340,9 @@ func TestWriterDefaultEntryBufferLimitGuard(t *testing.T) {
 	var buf bytes.Buffer
 	w := NewWriter(&buf)
 
-	iw, err := w.Create("default-limit.bin")
+	iw, err := w.CreateHeader(&FileHeader{Name: "default-limit.bin", Method: Store})
 	if err != nil {
-		t.Fatalf("Create: %v", err)
+		t.Fatalf("CreateHeader: %v", err)
 	}
 	fw := iw.(*fileWriter)
 	if got, want := fw.entryBufferLimit, DefaultMaxEntryBufferSize; got != want {
@@ -397,9 +397,9 @@ func TestWriterBufferLimitOverride(t *testing.T) {
 		MaxMethod14InputBufferSize: 8,
 	})
 
-	iw, err := w.Create("override-limit.bin")
+	iw, err := w.CreateHeader(&FileHeader{Name: "override-limit.bin", Method: Store})
 	if err != nil {
-		t.Fatalf("Create: %v", err)
+		t.Fatalf("CreateHeader: %v", err)
 	}
 	fw := iw.(*fileWriter)
 	if got, want := fw.entryBufferLimit, uint64(4); got != want {
@@ -428,9 +428,9 @@ func TestWriterBufferLimitOverride(t *testing.T) {
 		MaxEntryBufferSize:         8,
 		MaxMethod14InputBufferSize: 8,
 	})
-	iw2, err := w2.Create("override-ok.bin")
+	iw2, err := w2.CreateHeader(&FileHeader{Name: "override-ok.bin", Method: Store})
 	if err != nil {
-		t.Fatalf("Create second: %v", err)
+		t.Fatalf("CreateHeader second: %v", err)
 	}
 	if n, err := iw2.Write([]byte("12345678")); err != nil || n != 8 {
 		t.Fatalf("Write second = (%d, %v), want (8, nil)", n, err)
@@ -498,9 +498,9 @@ func TestWriterEntryBufferSpillsToDiskAndCleansUp(t *testing.T) {
 		MaxMethod14InputBufferSize: DefaultMaxMethod14InputBufferSize,
 	})
 
-	iw, err := w.Create("spill.bin")
+	iw, err := w.CreateHeader(&FileHeader{Name: "spill.bin", Method: Store})
 	if err != nil {
-		t.Fatalf("Create: %v", err)
+		t.Fatalf("CreateHeader: %v", err)
 	}
 	fw := iw.(*fileWriter)
 

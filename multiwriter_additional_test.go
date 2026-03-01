@@ -220,6 +220,19 @@ func TestMultiVolumeWriterAddFS(t *testing.T) {
 		t.Fatalf("OpenMultiReader: %v", err)
 	}
 	defer r.Close()
+	methodByName := make(map[string]uint16, len(r.File))
+	for _, f := range r.File {
+		methodByName[f.Name] = f.Method
+	}
+	if got, want := methodByName["root.txt"], uint16(Method1); got != want {
+		t.Fatalf("root.txt method = %d, want %d", got, want)
+	}
+	if got, want := methodByName["sub/leaf.txt"], uint16(Method1); got != want {
+		t.Fatalf("sub/leaf.txt method = %d, want %d", got, want)
+	}
+	if got, want := methodByName["sub/"], uint16(Store); got != want {
+		t.Fatalf("sub/ method = %d, want %d", got, want)
+	}
 
 	root, err := r.Open("root.txt")
 	if err != nil {

@@ -35,9 +35,9 @@ func TestNewMultiVolumeWriterPartNaming(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewMultiVolumeWriter: %v", err)
 			}
-			fw, err := mw.Create("payload.bin")
+			fw, err := mw.CreateHeader(&FileHeader{Name: "payload.bin", Method: Store})
 			if err != nil {
-				t.Fatalf("Create: %v", err)
+				t.Fatalf("CreateHeader: %v", err)
 			}
 			if _, err := fw.Write(payload); err != nil {
 				t.Fatalf("Write: %v", err)
@@ -88,9 +88,9 @@ func TestMultiVolumeWriterPartNamingBeyondA99(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMultiVolumeWriter: %v", err)
 	}
-	fw, err := mw.Create("payload.bin")
+	fw, err := mw.CreateHeader(&FileHeader{Name: "payload.bin", Method: Store})
 	if err != nil {
-		t.Fatalf("Create: %v", err)
+		t.Fatalf("CreateHeader: %v", err)
 	}
 	if _, err := fw.Write(payload); err != nil {
 		t.Fatalf("Write: %v", err)
@@ -121,9 +121,9 @@ func TestMultiVolumeWriterContinuationFlags(t *testing.T) {
 		t.Fatalf("NewMultiVolumeWriter: %v", err)
 	}
 
-	fw, err := mw.Create("split.bin")
+	fw, err := mw.CreateHeader(&FileHeader{Name: "split.bin", Method: Store})
 	if err != nil {
-		t.Fatalf("Create: %v", err)
+		t.Fatalf("CreateHeader: %v", err)
 	}
 	if _, err := fw.Write(payload); err != nil {
 		t.Fatalf("Write: %v", err)
@@ -284,9 +284,9 @@ func TestInteropARJBinaryExtractsMultiVolumeWriterArchive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMultiVolumeWriter: %v", err)
 	}
-	fw, err := mw.Create("payload.bin")
+	fw, err := mw.CreateHeader(&FileHeader{Name: "payload.bin", Method: Store})
 	if err != nil {
-		t.Fatalf("Create: %v", err)
+		t.Fatalf("CreateHeader: %v", err)
 	}
 	if _, err := fw.Write(payload); err != nil {
 		t.Fatalf("Write: %v", err)

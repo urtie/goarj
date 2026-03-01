@@ -60,6 +60,9 @@ func TestRoundTrip(t *testing.T) {
 	if got, want := len(r.File), 3; got != want {
 		t.Fatalf("file count = %d, want %d", got, want)
 	}
+	if got, want := r.File[0].Method, uint16(Method1); got != want {
+		t.Fatalf("a.txt method = %d, want %d", got, want)
+	}
 
 	rc, err := r.File[0].Open()
 	if err != nil {
@@ -137,6 +140,39 @@ func TestOpenReader(t *testing.T) {
 	}
 }
 
+func TestCreateUsesMethod1CompressionByDefault(t *testing.T) {
+	payload := bytes.Repeat([]byte("compress-default-path-"), 512)
+
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	fw, err := w.Create("payload.txt")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := fw.Write(payload); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close writer: %v", err)
+	}
+
+	r, err := NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	if got, want := len(r.File), 1; got != want {
+		t.Fatalf("file count = %d, want %d", got, want)
+	}
+
+	f := r.File[0]
+	if got, want := f.Method, uint16(Method1); got != want {
+		t.Fatalf("method = %d, want %d", got, want)
+	}
+	if f.CompressedSize64 >= f.UncompressedSize64 {
+		t.Fatalf("compressed size = %d, want less than uncompressed %d", f.CompressedSize64, f.UncompressedSize64)
+	}
+}
+
 func TestFindMainHeaderWithPrefix(t *testing.T) {
 	var buf bytes.Buffer
 	w := NewWriter(&buf)
@@ -173,9 +209,9 @@ func TestFindMainHeaderWithPrefix(t *testing.T) {
 func TestChecksumError(t *testing.T) {
 	var buf bytes.Buffer
 	w := NewWriter(&buf)
-	fw, err := w.Create("sum.txt")
+	fw, err := w.CreateHeader(&FileHeader{Name: "sum.txt", Method: Store})
 	if err != nil {
-		t.Fatalf("Create: %v", err)
+		t.Fatalf("CreateHeader: %v", err)
 	}
 	if _, err := io.WriteString(fw, "checksum"); err != nil {
 		t.Fatalf("Write: %v", err)
