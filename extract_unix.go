@@ -130,7 +130,9 @@ func (r *StreamReader) extractAllWithOptions(dir string, opts ExtractOptions) er
 				mode:    h.Mode(),
 				modTime: h.ModTime(),
 			}
-			abortStreamReadCloser(rc)
+			if err := rc.Close(); err != nil {
+				return err
+			}
 			continue
 		}
 

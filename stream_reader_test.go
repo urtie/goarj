@@ -2,6 +2,7 @@ package arj
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"hash/crc32"
 	"io"
@@ -36,6 +37,44 @@ func buildStreamArchive(t *testing.T, entries []streamTestEntry) []byte {
 		t.Fatalf("Close writer: %v", err)
 	}
 	return append([]byte(nil), buf.Bytes()...)
+}
+
+func injectFirstLocalEntryPayload(t *testing.T, archive, payload []byte) []byte {
+	t.Helper()
+
+	out := append([]byte(nil), archive...)
+	size := int64(len(out))
+	r := bytes.NewReader(out)
+
+	_, _, localOff, err := readHeaderBlock(r, size, 0)
+	if err != nil {
+		t.Fatalf("readHeaderBlock(main): %v", err)
+	}
+	basic, _, localDataOff, err := readHeaderBlock(r, size, localOff)
+	if err != nil {
+		t.Fatalf("readHeaderBlock(local): %v", err)
+	}
+	if len(basic) < 24 {
+		t.Fatalf("local header basic size = %d, want >= 24", len(basic))
+	}
+	if len(payload) > int(^uint32(0)) {
+		t.Fatalf("payload length = %d exceeds uint32", len(payload))
+	}
+
+	mutBasic := append([]byte(nil), basic...)
+	binary.LittleEndian.PutUint32(mutBasic[12:16], uint32(len(payload)))
+	binary.LittleEndian.PutUint32(mutBasic[16:20], uint32(len(payload)))
+	binary.LittleEndian.PutUint32(mutBasic[20:24], crc32.ChecksumIEEE(payload))
+
+	basicStart := int(localOff) + 4
+	copy(out[basicStart:basicStart+len(mutBasic)], mutBasic)
+	basicCRC := crc32.ChecksumIEEE(mutBasic)
+	basicCRCStart := basicStart + len(mutBasic)
+	binary.LittleEndian.PutUint32(out[basicCRCStart:basicCRCStart+4], basicCRC)
+
+	dataOff := int(localDataOff)
+	out = append(out[:dataOff], append(append([]byte(nil), payload...), out[dataOff:]...)...)
+	return out
 }
 
 func TestStreamReaderNextSequential(t *testing.T) {
@@ -183,6 +222,49 @@ func TestNewStreamReaderSkipsLeadingPrefix(t *testing.T) {
 	}
 }
 
+func TestNewStreamReaderSkipsInvalidSignatureCandidates(t *testing.T) {
+	archive := buildStreamArchive(t, []streamTestEntry{
+		{
+			header:  FileHeader{Name: "file.txt", Method: Store},
+			payload: []byte("ok"),
+		},
+	})
+	prefix := []byte{
+		0x00, 0x11,
+		arjHeaderID1, arjHeaderID2, 0x01, 0x00, // invalid basic header size
+		0x33, 0x44,
+		arjHeaderID1, arjHeaderID2, 0x00, 0x00, // invalid end-of-headers block
+		0x55, 0x66,
+	}
+	stream := append(append([]byte(nil), prefix...), archive...)
+
+	sr, err := NewStreamReader(bytes.NewReader(stream))
+	if err != nil {
+		t.Fatalf("NewStreamReader: %v", err)
+	}
+	if got, want := sr.BaseOffset(), int64(len(prefix)); got != want {
+		t.Fatalf("BaseOffset = %d, want %d", got, want)
+	}
+
+	h, rc, err := sr.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if h.Name != "file.txt" {
+		t.Fatalf("entry name = %q, want %q", h.Name, "file.txt")
+	}
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if string(got) != "ok" {
+		t.Fatalf("payload = %q, want %q", got, "ok")
+	}
+}
+
 func TestStreamReaderWithOptionsMaxEntries(t *testing.T) {
 	archive := buildStreamArchive(t, []streamTestEntry{
 		{
@@ -230,6 +312,45 @@ func TestExtractAllStream(t *testing.T) {
 	})
 	out := filepath.Join(t.TempDir(), "out")
 
+	if err := ExtractAllStream(bytes.NewReader(archive), out); err != nil {
+		t.Fatalf("ExtractAllStream: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(out, "docs", "readme.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile(readme): %v", err)
+	}
+	if string(got) != "stream extract" {
+		t.Fatalf("readme payload = %q, want %q", got, "stream extract")
+	}
+}
+
+func TestExtractAllStreamDirectoryPayloadKeepsAlignment(t *testing.T) {
+	baseArchive := buildStreamArchive(t, []streamTestEntry{
+		{
+			header: FileHeader{Name: "docs/", Method: Store, fileType: arjFileTypeDirectory},
+		},
+		{
+			header:  FileHeader{Name: "docs/readme.txt", Method: Store},
+			payload: []byte("stream extract"),
+		},
+	})
+	archive := injectFirstLocalEntryPayload(t, baseArchive, []byte("dir-payload"))
+
+	r, err := NewReader(bytes.NewReader(archive), int64(len(archive)))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	if got, want := len(r.File), 2; got != want {
+		t.Fatalf("file count = %d, want %d", got, want)
+	}
+	if !r.File[0].isDir() {
+		t.Fatalf("first entry isDir = false, want true")
+	}
+	if r.File[0].CompressedSize64 == 0 {
+		t.Fatalf("directory compressed size = 0, want > 0 for alignment regression coverage")
+	}
+
+	out := filepath.Join(t.TempDir(), "out")
 	if err := ExtractAllStream(bytes.NewReader(archive), out); err != nil {
 		t.Fatalf("ExtractAllStream: %v", err)
 	}

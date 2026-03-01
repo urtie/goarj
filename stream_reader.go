@@ -218,7 +218,14 @@ func scanToHeaderSignature(r *bufio.Reader) (int64, error) {
 		}
 		off++
 		if havePrev && prev == arjHeaderID1 && b == arjHeaderID2 {
-			return off - 2, nil
+			sizeBytes, err := r.Peek(2)
+			if err != nil {
+				return 0, normalizeHeaderReadError(err)
+			}
+			basicSize := int(binary.LittleEndian.Uint16(sizeBytes))
+			if basicSize >= arjMinFirstHeaderSize && basicSize <= arjMaxBasicHeaderSize {
+				return off - 2, nil
+			}
 		}
 		havePrev = true
 		prev = b
