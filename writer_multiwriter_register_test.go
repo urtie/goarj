@@ -349,40 +349,31 @@ func TestWriterDefaultEntryBufferLimitGuard(t *testing.T) {
 		t.Fatalf("entryBufferLimit = %d, want %d", got, want)
 	}
 
-	chunk := bytes.Repeat([]byte{'x'}, 1<<20)
-	var total uint64
-	for {
-		n, err := fw.Write(chunk)
-		total += uint64(n)
-		if err == nil {
-			continue
-		}
-		if !errors.Is(err, ErrBufferLimitExceeded) {
-			t.Fatalf("Write error = %v, want %v", err, ErrBufferLimitExceeded)
-		}
-		var limitErr *BufferLimitError
-		if !errors.As(err, &limitErr) {
-			t.Fatalf("Write error type = %T, want *BufferLimitError", err)
-		}
-		if got, want := limitErr.Scope, bufferScopeWriterEntryCompressed; got != want {
-			t.Fatalf("limit scope = %q, want %q", got, want)
-		}
-		if got, want := limitErr.Limit, DefaultMaxEntryBufferSize; got != want {
-			t.Fatalf("limit value = %d, want %d", got, want)
-		}
-		break
-	}
-
-	if got, want := total, DefaultMaxEntryBufferSize; got != want {
-		t.Fatalf("total buffered = %d, want %d", got, want)
-	}
-
+	// Simulate a fully buffered entry so guard behavior remains deterministic
+	// even if default limits change.
+	fw.comp.size = fw.entryBufferLimit
 	n, err := fw.Write([]byte("x"))
 	if got, want := n, 0; got != want {
-		t.Fatalf("second Write bytes = %d, want %d", got, want)
+		t.Fatalf("Write bytes = %d, want %d", got, want)
 	}
 	if !errors.Is(err, ErrBufferLimitExceeded) {
-		t.Fatalf("second Write error = %v, want %v", err, ErrBufferLimitExceeded)
+		t.Fatalf("Write error = %v, want %v", err, ErrBufferLimitExceeded)
+	}
+	var limitErr *BufferLimitError
+	if !errors.As(err, &limitErr) {
+		t.Fatalf("Write error type = %T, want *BufferLimitError", err)
+	}
+	if got, want := limitErr.Scope, bufferScopeWriterEntryCompressed; got != want {
+		t.Fatalf("limit scope = %q, want %q", got, want)
+	}
+	if got, want := limitErr.Limit, DefaultMaxEntryBufferSize; got != want {
+		t.Fatalf("limit value = %d, want %d", got, want)
+	}
+	if got, want := limitErr.Buffered, DefaultMaxEntryBufferSize; got != want {
+		t.Fatalf("buffered = %d, want %d", got, want)
+	}
+	if got, want := limitErr.Attempted, uint64(1); got != want {
+		t.Fatalf("attempted = %d, want %d", got, want)
 	}
 	if err := fw.Close(); !errors.Is(err, ErrBufferLimitExceeded) {
 		t.Fatalf("Close error = %v, want %v", err, ErrBufferLimitExceeded)

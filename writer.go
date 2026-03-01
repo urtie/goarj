@@ -47,7 +47,7 @@ const maxARJFileSize = uint64(^uint32(0))
 const (
 	// DefaultMaxEntryBufferSize is the default per-entry buffering cap in bytes.
 	// Exceeding it returns ErrBufferLimitExceeded.
-	DefaultMaxEntryBufferSize uint64 = 64 << 20
+	DefaultMaxEntryBufferSize uint64 = 256 << 20
 	// DefaultMaxCompressedEntryBufferSize is the default per-entry compressed
 	// buffering cap in bytes.
 	DefaultMaxCompressedEntryBufferSize = DefaultMaxEntryBufferSize
@@ -56,7 +56,7 @@ const (
 	DefaultMaxPlainEntryBufferSize = DefaultMaxEntryBufferSize
 	// DefaultMaxMethod14InputBufferSize is the default max in-memory buffered
 	// method 1-4 compressor input size in bytes.
-	DefaultMaxMethod14InputBufferSize uint64 = 64 << 20
+	DefaultMaxMethod14InputBufferSize uint64 = 256 << 20
 )
 
 const (

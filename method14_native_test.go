@@ -191,32 +191,31 @@ func TestMethod14CompressorDefaultInputLimitGuard(t *testing.T) {
 		t.Fatalf("default method14 input limit = %d, want %d", got, want)
 	}
 
-	chunk := bytes.Repeat([]byte{'m'}, 1<<20)
-	var total uint64
-	for {
-		n, err := cw.Write(chunk)
-		total += uint64(n)
-		if err == nil {
-			continue
-		}
-		if !errors.Is(err, ErrBufferLimitExceeded) {
-			t.Fatalf("Write error = %v, want %v", err, ErrBufferLimitExceeded)
-		}
-		var limitErr *BufferLimitError
-		if !errors.As(err, &limitErr) {
-			t.Fatalf("Write error type = %T, want *BufferLimitError", err)
-		}
-		if got, want := limitErr.Scope, bufferScopeMethod14Input; got != want {
-			t.Fatalf("limit scope = %q, want %q", got, want)
-		}
-		if got, want := limitErr.Limit, DefaultMaxMethod14InputBufferSize; got != want {
-			t.Fatalf("limit value = %d, want %d", got, want)
-		}
-		break
+	// Simulate a full compressor input buffer so this test remains fast and
+	// stable regardless of default limit value.
+	mc.buf.size = mc.limit
+	n, err := cw.Write([]byte("m"))
+	if got, want := n, 0; got != want {
+		t.Fatalf("Write bytes = %d, want %d", got, want)
 	}
-
-	if got, want := total, DefaultMaxMethod14InputBufferSize; got != want {
-		t.Fatalf("total buffered = %d, want %d", got, want)
+	if !errors.Is(err, ErrBufferLimitExceeded) {
+		t.Fatalf("Write error = %v, want %v", err, ErrBufferLimitExceeded)
+	}
+	var limitErr *BufferLimitError
+	if !errors.As(err, &limitErr) {
+		t.Fatalf("Write error type = %T, want *BufferLimitError", err)
+	}
+	if got, want := limitErr.Scope, bufferScopeMethod14Input; got != want {
+		t.Fatalf("limit scope = %q, want %q", got, want)
+	}
+	if got, want := limitErr.Limit, DefaultMaxMethod14InputBufferSize; got != want {
+		t.Fatalf("limit value = %d, want %d", got, want)
+	}
+	if got, want := limitErr.Buffered, DefaultMaxMethod14InputBufferSize; got != want {
+		t.Fatalf("buffered = %d, want %d", got, want)
+	}
+	if got, want := limitErr.Attempted, uint64(1); got != want {
+		t.Fatalf("attempted = %d, want %d", got, want)
 	}
 }
 
