@@ -436,12 +436,13 @@ func (f *File) openWithPassword(password []byte) (io.ReadCloser, error) {
 	}
 
 	passwordCopy := append([]byte(nil), password...)
-	segments := append([]fileSegment(nil), f.segmentList()...)
-	if len(segments) == 1 {
-		rc, err := f.openSegment(segments[0], passwordCopy)
+	segmentList := f.segmentList()
+	if len(segmentList) == 1 {
+		rc, err := f.openSegment(segmentList[0], passwordCopy)
 		clearBytes(passwordCopy)
 		return rc, err
 	}
+	segments := append([]fileSegment(nil), segmentList...)
 
 	rc := &multiSegmentReadCloser{
 		segments: segments,
@@ -913,7 +914,8 @@ func probeArchiveLayoutWithLimits(r io.ReaderAt, size, off int64, limits ParserL
 	if len(mainBasic) == 0 {
 		return 0, 0, false, nil
 	}
-	if _, err := parseMainHeaderOwned(mainBasic, mainExt); err != nil {
+	_ = mainExt
+	if !probeMainHeaderBasicValid(mainBasic) {
 		return 0, 0, false, nil
 	}
 
@@ -933,11 +935,12 @@ func probeArchiveLayoutWithLimits(r io.ReaderAt, size, off int64, limits ParserL
 			return 0, 0, false, nil
 		}
 
-		f, err := parseLocalFileHeaderOwned(basic, extHeaders, nil)
-		if err != nil {
+		_ = extHeaders
+		compressedSize, ok := probeLocalHeaderCompressedSize(basic)
+		if !ok {
 			return 0, 0, false, nil
 		}
-		nextOff, ok := advanceOffsetWithinSize(afterHeader, f.CompressedSize64, size)
+		nextOff, ok := advanceOffsetWithinSize(afterHeader, compressedSize, size)
 		if !ok {
 			return 0, 0, false, nil
 		}
@@ -945,6 +948,44 @@ func probeArchiveLayoutWithLimits(r io.ReaderAt, size, off int64, limits ParserL
 		files++
 		off = nextOff
 	}
+}
+
+func probeMainHeaderBasicValid(basic []byte) bool {
+	if len(basic) < arjMinFirstHeaderSize {
+		return false
+	}
+	firstSize := int(basic[0])
+	if firstSize < arjMinFirstHeaderSize || firstSize > len(basic) {
+		return false
+	}
+	if basic[6] != arjFileTypeMain {
+		return false
+	}
+	return probeHeaderNameCommentValid(basic, firstSize)
+}
+
+func probeLocalHeaderCompressedSize(basic []byte) (uint64, bool) {
+	if len(basic) < arjMinFirstHeaderSize {
+		return 0, false
+	}
+	firstSize := int(basic[0])
+	if firstSize < arjMinFirstHeaderSize || firstSize > len(basic) {
+		return 0, false
+	}
+	if !probeHeaderNameCommentValid(basic, firstSize) {
+		return 0, false
+	}
+	return uint64(binary.LittleEndian.Uint32(basic[12:16])), true
+}
+
+func probeHeaderNameCommentValid(basic []byte, firstSize int) bool {
+	rest := basic[firstSize:]
+	i := bytes.IndexByte(rest, 0)
+	if i < 0 {
+		return false
+	}
+	rest = rest[i+1:]
+	return bytes.IndexByte(rest, 0) >= 0
 }
 
 func readHeaderBlock(r io.ReaderAt, size, off int64) (basic []byte, extHeaders [][]byte, nextOff int64, err error) {
