@@ -35,6 +35,11 @@ var (
 	errRawCopySizeMismatch        = errors.New("arj: raw copy byte count mismatch")
 	errRawPayloadSizeMismatch     = errors.New("arj: raw payload size does not match local header compressed size")
 	errRawStoreSizeMismatch       = errors.New("arj: raw store payload size does not match local header uncompressed size")
+	checksumScratchPool           = sync.Pool{
+		New: func() any {
+			return make([]byte, 32<<10)
+		},
+	}
 	compressedProbeCopyBufferPool = sync.Pool{
 		New: func() any {
 			return make([]byte, 32<<10)
@@ -1614,7 +1619,16 @@ func checksumEntryBufferRange(buf *entryBuffer, off int64, n int) (uint32, error
 	}
 
 	sum := crc32.NewIEEE()
-	scratch := make([]byte, 32<<10)
+	scratch := checksumScratchPool.Get().([]byte)
+	if len(scratch) == 0 {
+		scratch = make([]byte, 32<<10)
+	}
+	defer func() {
+		if cap(scratch) >= 32<<10 {
+			checksumScratchPool.Put(scratch[:32<<10])
+		}
+	}()
+
 	remaining := n
 	for remaining > 0 {
 		chunkN := len(scratch)
