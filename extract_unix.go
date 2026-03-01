@@ -90,6 +90,88 @@ func (r *Reader) extractAllWithOptions(dir string, opts ExtractOptions) error {
 	return nil
 }
 
+func (r *StreamReader) extractAllWithOptions(dir string, opts ExtractOptions) error {
+	root, err := openUnixExtractRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = root.close()
+	}()
+
+	quota := &extractQuota{opts: opts}
+	dirs := make(map[string]extractedDir)
+	for {
+		h, rc, err := r.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if h == nil || rc == nil {
+			return ErrFormat
+		}
+
+		rel, err := safeExtractRelativePath(h.Name)
+		if err != nil {
+			abortStreamReadCloser(rc)
+			return err
+		}
+
+		if h.isDir() {
+			if err := root.mkdirAll(rel, h.Name); err != nil {
+				abortStreamReadCloser(rc)
+				return err
+			}
+			dirs[rel] = extractedDir{
+				path:    rel,
+				name:    h.Name,
+				mode:    h.Mode(),
+				modTime: h.ModTime(),
+			}
+			abortStreamReadCloser(rc)
+			continue
+		}
+
+		if err := quota.reserveFileWithHeaderSize(h.UncompressedSize64); err != nil {
+			abortStreamReadCloser(rc)
+			return fmt.Errorf("arj: extract %q: %w", h.Name, err)
+		}
+
+		parent := filepath.Dir(rel)
+		if parent == "." {
+			parent = ""
+		}
+		if err := root.mkdirAll(parent, h.Name); err != nil {
+			abortStreamReadCloser(rc)
+			return err
+		}
+		if err := root.extractOneStreamFile(rel, h.Name, h, rc, quota); err != nil {
+			return fmt.Errorf("arj: extract %q: %w", h.Name, err)
+		}
+	}
+
+	orderedDirs := make([]extractedDir, 0, len(dirs))
+	for _, d := range dirs {
+		orderedDirs = append(orderedDirs, d)
+	}
+	sort.Slice(orderedDirs, func(i, j int) bool {
+		depthI := strings.Count(orderedDirs[i].path, string(os.PathSeparator))
+		depthJ := strings.Count(orderedDirs[j].path, string(os.PathSeparator))
+		if depthI != depthJ {
+			return depthI > depthJ
+		}
+		return orderedDirs[i].path > orderedDirs[j].path
+	})
+	for _, d := range orderedDirs {
+		if err := root.applyDirMetadata(d.path, d.name, d.mode, d.modTime); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func openUnixExtractRoot(dir string) (*unixExtractRoot, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
@@ -213,6 +295,75 @@ func (r *unixExtractRoot) extractOneFile(relPath, entryName string, f *File, quo
 		return err
 	}
 	if err := applyExtractMetadataToFD(int(tmpFile.Fd()), entryName, f.Mode(), f.ModTime()); err != nil {
+		return err
+	}
+	if err := runExtractTestHookBeforeCommit(entryName, tmpFile); err != nil {
+		return err
+	}
+	stagedInfo, err := captureStagedTempIdentityAt(parentFD, tmpFile, tmpName, entryName)
+	if err != nil {
+		return err
+	}
+	if err := verifyStagedTempIdentityAt(parentFD, tmpName, entryName, stagedInfo); err != nil {
+		return err
+	}
+
+	base := filepath.Base(relPath)
+	if err := syscall.Renameat(parentFD, tmpName, parentFD, base); err != nil {
+		return wrapExtractSyscallErr(entryName, err)
+	}
+	removeTemp = false
+	if err := tmpFile.Close(); err != nil {
+		return extractPathError(entryName, err)
+	}
+	return nil
+}
+
+func (r *unixExtractRoot) extractOneStreamFile(relPath, entryName string, h *FileHeader, rc io.ReadCloser, quota *extractQuota) (err error) {
+	if h == nil || rc == nil {
+		return ErrFormat
+	}
+	success := false
+	defer func() {
+		if !success {
+			abortStreamReadCloser(rc)
+		}
+	}()
+
+	runExtractTestHookBeforeCreate(entryName)
+
+	parent := filepath.Dir(relPath)
+	if parent == "." {
+		parent = ""
+	}
+	parentFD, err := r.openDir(parent, entryName, true)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = syscall.Close(parentFD)
+	}()
+
+	tmpFile, tmpName, err := createTempFileAt(parentFD, entryName)
+	if err != nil {
+		return err
+	}
+	removeTemp := true
+	defer func() {
+		_ = tmpFile.Close()
+		if removeTemp {
+			_ = syscall.Unlinkat(parentFD, tmpName)
+		}
+	}()
+
+	if _, err := io.Copy(&extractQuotaWriter{dst: tmpFile, quota: quota}, rc); err != nil {
+		return err
+	}
+	if err := rc.Close(); err != nil {
+		return err
+	}
+	success = true
+	if err := applyExtractMetadataToFD(int(tmpFile.Fd()), entryName, h.Mode(), h.ModTime()); err != nil {
 		return err
 	}
 	if err := runExtractTestHookBeforeCommit(entryName, tmpFile); err != nil {

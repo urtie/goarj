@@ -133,7 +133,50 @@ func (r *Reader) ExtractAllWithOptions(dir string, opts ExtractOptions) error {
 	return r.extractAllWithOptions(dir, normalizeExtractOptions(opts))
 }
 
+// ExtractAllStream extracts all entries from an ARJ stream under dir.
+//
+// It applies default resource limits and best-effort path safety checks.
+// For fail-closed extraction semantics, call ExtractAllStreamWithOptions with
+// StrictExtractOptions.
+func ExtractAllStream(r io.Reader, dir string) error {
+	return ExtractAllStreamWithOptions(r, dir, defaultExtractOptions())
+}
+
+// ExtractAllStreamWithOptions extracts all entries from an ARJ stream under
+// dir with configurable limits.
+func ExtractAllStreamWithOptions(r io.Reader, dir string, opts ExtractOptions) error {
+	sr, err := NewStreamReader(r)
+	if err != nil {
+		return err
+	}
+	return sr.ExtractAllWithOptions(dir, opts)
+}
+
+// ExtractAll extracts all remaining stream entries under dir.
+func (r *StreamReader) ExtractAll(dir string) error {
+	return r.ExtractAllWithOptions(dir, defaultExtractOptions())
+}
+
+// ExtractAllWithOptions extracts all remaining stream entries under dir with
+// configurable limits.
+func (r *StreamReader) ExtractAllWithOptions(dir string, opts ExtractOptions) error {
+	if err := validateExtractOptions(opts); err != nil {
+		return err
+	}
+	if err := validateExtractStreamArchiveSecurityModes(r); err != nil {
+		return err
+	}
+	return r.extractAllWithOptions(dir, normalizeExtractOptions(opts))
+}
+
 func validateExtractArchiveSecurityModes(r *Reader) error {
+	if r == nil {
+		return ErrFormat
+	}
+	return unsupportedMainSecurityFlagsError(r.ArchiveHeader.Flags, r.ArchiveHeader.EncryptionVersion())
+}
+
+func validateExtractStreamArchiveSecurityModes(r *StreamReader) error {
 	if r == nil {
 		return ErrFormat
 	}

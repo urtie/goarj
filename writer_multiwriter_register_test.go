@@ -95,7 +95,7 @@ func TestMultiVolumeWriterWriteFailsEarlyAtSizeLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	fw := iw.(*multiVolumeFileWriter)
+	fw := iw.(*multiVolumeCompressedFileWriter)
 	fw.plainN = maxARJFileSize - 2
 
 	n, err := fw.Write([]byte("abcd"))
@@ -159,26 +159,11 @@ func TestMultiVolumeFileWriterCloseReturnsFirstWriteError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	fw := iw.(*multiVolumeFileWriter)
-
-	tmp, err := os.CreateTemp(t.TempDir(), "closed-plain-entry-buffer-*")
-	if err != nil {
-		t.Fatalf("CreateTemp: %v", err)
-	}
-	tmpPath := tmp.Name()
-	if err := tmp.Close(); err != nil {
-		t.Fatalf("Close temp file: %v", err)
-	}
-	fw.plain.file = tmp
-	fw.plain.filePath = tmpPath
-	fw.plain.removePath = tmpPath
-
-	_, writeErr := fw.Write([]byte("payload"))
-	if writeErr == nil {
-		t.Fatalf("Write error = nil, want non-nil")
-	}
-	if err := fw.Close(); !errors.Is(err, writeErr) {
-		t.Fatalf("Close error = %v, want wrapped %v", err, writeErr)
+	fw := iw.(*multiVolumeCompressedFileWriter)
+	wantErr := errors.New("test: multi volume write failure")
+	fw.latchWriteErr(wantErr)
+	if err := fw.Close(); !errors.Is(err, wantErr) {
+		t.Fatalf("Close error = %v, want wrapped %v", err, wantErr)
 	}
 }
 
@@ -243,7 +228,7 @@ func TestMultiVolumeWriterLatchesSinkWriteFailure(t *testing.T) {
 		t.Fatalf("close current file: %v", err)
 	}
 
-	firstErr := iw.(*multiVolumeFileWriter).Close()
+	firstErr := iw.(*multiVolumeCompressedFileWriter).Close()
 	if firstErr == nil {
 		firstErr = mw.Flush()
 	}
@@ -293,7 +278,7 @@ func TestMultiVolumeWriterLatchesFinalizeFailure(t *testing.T) {
 	if _, err := iw.Write([]byte("payload")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	if err := iw.(*multiVolumeFileWriter).Close(); err != nil {
+	if err := iw.(*multiVolumeCompressedFileWriter).Close(); err != nil {
 		t.Fatalf("Close entry: %v", err)
 	}
 	if mw.currentFile == nil {
@@ -431,7 +416,7 @@ func TestWriterBufferLimitOverride(t *testing.T) {
 	}
 }
 
-func TestMultiVolumeWriterBufferLimitOverride(t *testing.T) {
+func TestMultiVolumeWriterCompressedStreamingIgnoresBufferLimits(t *testing.T) {
 	archivePath := filepath.Join(t.TempDir(), "entry-buffer.arj")
 	mw, err := NewMultiVolumeWriter(archivePath, MultiVolumeWriterOptions{
 		VolumeSize: 8 * 1024,
@@ -447,20 +432,34 @@ func TestMultiVolumeWriterBufferLimitOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	fw := iw.(*multiVolumeFileWriter)
-	if got, want := fw.entryBufferLimit, uint64(4); got != want {
-		t.Fatalf("entryBufferLimit = %d, want %d", got, want)
+	if _, ok := iw.(*multiVolumeCompressedFileWriter); !ok {
+		t.Fatalf("writer type = %T, want *multiVolumeCompressedFileWriter", iw)
 	}
 
-	n, err := fw.Write([]byte("abcdef"))
-	if got, want := n, 4; got != want {
+	n, err := iw.Write([]byte("abcdef"))
+	if got, want := n, 6; got != want {
 		t.Fatalf("Write bytes = %d, want %d", got, want)
 	}
-	if !errors.Is(err, ErrBufferLimitExceeded) {
-		t.Fatalf("Write error = %v, want %v", err, ErrBufferLimitExceeded)
+	if err != nil {
+		t.Fatalf("Write error = %v, want nil", err)
 	}
-	if err := fw.Close(); !errors.Is(err, ErrBufferLimitExceeded) {
-		t.Fatalf("Close error = %v, want %v", err, ErrBufferLimitExceeded)
+	if err := iw.(io.Closer).Close(); err != nil {
+		t.Fatalf("Close entry: %v", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("Close writer: %v", err)
+	}
+
+	r, err := OpenReader(archivePath)
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer r.Close()
+	if got, want := len(r.File), 1; got != want {
+		t.Fatalf("file count = %d, want %d", got, want)
+	}
+	if got := mustReadFileEntry(t, r.File[0]); string(got) != "abcdef" {
+		t.Fatalf("payload = %q, want %q", got, "abcdef")
 	}
 
 	archivePath2 := filepath.Join(t.TempDir(), "entry-buffer-default.arj")
@@ -566,52 +565,207 @@ func TestWriterEntryBufferSpillTempFileRemovedOnCloseError(t *testing.T) {
 	}
 }
 
-func TestMultiVolumeWriterEntryBufferSpillsToDiskAndCleansUp(t *testing.T) {
-	archivePath := filepath.Join(t.TempDir(), "spill-multi.arj")
+func TestWriterSeekableCreateHeaderStreamsAndPatchesLocalHeader(t *testing.T) {
+	archivePath := filepath.Join(t.TempDir(), "seekable-stream.arj")
+	f, err := os.OpenFile(archivePath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	defer f.Close()
+
+	w := NewWriter(f)
+	iw, err := w.CreateHeader(&FileHeader{Name: "stream.bin", Method: Store})
+	if err != nil {
+		t.Fatalf("CreateHeader: %v", err)
+	}
+	fw := iw.(*fileWriter)
+	if fw.comp != nil {
+		t.Fatalf("comp buffer present for seekable output")
+	}
+
+	beforeInfo, err := f.Stat()
+	if err != nil {
+		t.Fatalf("Stat before write: %v", err)
+	}
+	beforeSize := beforeInfo.Size()
+
+	payload := bytes.Repeat([]byte("seekable-stream-"), 512)
+	n, err := iw.Write(payload)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got, want := n, len(payload); got != want {
+		t.Fatalf("Write bytes = %d, want %d", got, want)
+	}
+
+	afterInfo, err := f.Stat()
+	if err != nil {
+		t.Fatalf("Stat after write: %v", err)
+	}
+	if afterInfo.Size() <= beforeSize {
+		t.Fatalf("archive size after write = %d, want > %d", afterInfo.Size(), beforeSize)
+	}
+
+	if err := iw.(io.Closer).Close(); err != nil {
+		t.Fatalf("Close entry: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close writer: %v", err)
+	}
+
+	r, err := OpenReader(archivePath)
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer r.Close()
+	if got, want := len(r.File), 1; got != want {
+		t.Fatalf("file count = %d, want %d", got, want)
+	}
+	fh := r.File[0]
+	if got, want := fh.UncompressedSize64, uint64(len(payload)); got != want {
+		t.Fatalf("uncompressed size = %d, want %d", got, want)
+	}
+	if got, want := fh.CompressedSize64, uint64(len(payload)); got != want {
+		t.Fatalf("compressed size = %d, want %d", got, want)
+	}
+	if got := mustReadFileEntry(t, fh); !bytes.Equal(got, payload) {
+		t.Fatalf("payload mismatch")
+	}
+}
+
+func TestMultiVolumeWriterStoreStreamsAcrossVolumesDuringWrite(t *testing.T) {
+	archivePath := filepath.Join(t.TempDir(), "store-streaming.arj")
+	mw, err := NewMultiVolumeWriter(archivePath, MultiVolumeWriterOptions{VolumeSize: 512})
+	if err != nil {
+		t.Fatalf("NewMultiVolumeWriter: %v", err)
+	}
+
+	iw, err := mw.CreateHeader(&FileHeader{Name: "store.bin", Method: Store})
+	if err != nil {
+		t.Fatalf("CreateHeader: %v", err)
+	}
+	if _, ok := iw.(*multiVolumeStoreFileWriter); !ok {
+		t.Fatalf("writer type = %T, want *multiVolumeStoreFileWriter", iw)
+	}
+
+	payload := bytes.Repeat([]byte("store-stream-segment-"), 700)
+	n, err := iw.Write(payload)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got, want := n, len(payload); got != want {
+		t.Fatalf("Write bytes = %d, want %d", got, want)
+	}
+
+	if got := len(mw.Parts()); got < 2 {
+		t.Fatalf("parts during active store stream = %d, want >= 2", got)
+	}
+
+	if err := iw.(io.Closer).Close(); err != nil {
+		t.Fatalf("Close entry: %v", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("Close writer: %v", err)
+	}
+
+	mr, err := OpenMultiReader(archivePath)
+	if err != nil {
+		t.Fatalf("OpenMultiReader: %v", err)
+	}
+	defer mr.Close()
+	if got, want := len(mr.File), 1; got != want {
+		t.Fatalf("file count = %d, want %d", got, want)
+	}
+	if got := mustReadFileEntry(t, mr.File[0]); !bytes.Equal(got, payload) {
+		t.Fatalf("payload mismatch")
+	}
+}
+
+func TestMultiVolumeWriterCompressedStreamsAcrossVolumesDuringWrite(t *testing.T) {
+	archivePath := filepath.Join(t.TempDir(), "compressed-streaming-parts.arj")
+	mw, err := NewMultiVolumeWriter(archivePath, MultiVolumeWriterOptions{VolumeSize: 768})
+	if err != nil {
+		t.Fatalf("NewMultiVolumeWriter: %v", err)
+	}
+
+	iw, err := mw.CreateHeader(&FileHeader{Name: "compressed.bin", Method: Method1})
+	if err != nil {
+		t.Fatalf("CreateHeader: %v", err)
+	}
+	if _, ok := iw.(*multiVolumeCompressedFileWriter); !ok {
+		t.Fatalf("writer type = %T, want *multiVolumeCompressedFileWriter", iw)
+	}
+
+	payload := make([]byte, 192<<10)
+	for i := range payload {
+		payload[i] = byte((i * 131) % 251)
+	}
+	n, err := iw.Write(payload)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got, want := n, len(payload); got != want {
+		t.Fatalf("Write bytes = %d, want %d", got, want)
+	}
+
+	if got := len(mw.Parts()); got < 2 {
+		t.Fatalf("parts during active compressed stream = %d, want >= 2", got)
+	}
+
+	if err := iw.(io.Closer).Close(); err != nil {
+		t.Fatalf("Close entry: %v", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("Close writer: %v", err)
+	}
+
+	mr, err := OpenMultiReader(archivePath)
+	if err != nil {
+		t.Fatalf("OpenMultiReader: %v", err)
+	}
+	defer mr.Close()
+	if got, want := len(mr.File), 1; got != want {
+		t.Fatalf("file count = %d, want %d", got, want)
+	}
+	if got := mustReadFileEntry(t, mr.File[0]); !bytes.Equal(got, payload) {
+		t.Fatalf("payload mismatch")
+	}
+}
+
+func TestMultiVolumeWriterCompressedStreamingRoundTrip(t *testing.T) {
+	archivePath := filepath.Join(t.TempDir(), "compressed-streaming.arj")
 	mw, err := NewMultiVolumeWriter(archivePath, MultiVolumeWriterOptions{
 		VolumeSize: 32 << 20,
 		BufferLimits: WriteBufferLimits{
-			MaxEntryBufferSize: maxInMemoryEntrySpoolSize + (2 << 20),
+			MaxEntryBufferSize: 64,
 		},
 	})
 	if err != nil {
 		t.Fatalf("NewMultiVolumeWriter: %v", err)
 	}
 
-	iw, err := mw.Create("spill.bin")
+	iw, err := mw.Create("stream.bin")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	fw := iw.(*multiVolumeFileWriter)
+	if _, ok := iw.(*multiVolumeCompressedFileWriter); !ok {
+		t.Fatalf("writer type = %T, want *multiVolumeCompressedFileWriter", iw)
+	}
 
 	payload := bytes.Repeat([]byte{'m'}, int(maxInMemoryEntrySpoolSize)+(256<<10))
-	if n, err := fw.Write(payload); err != nil || n != len(payload) {
+	if n, err := iw.Write(payload); err != nil || n != len(payload) {
 		t.Fatalf("Write = (%d, %v), want (%d, nil)", n, err, len(payload))
 	}
-	if !fw.plain.Spilled() {
-		t.Fatalf("plain buffer not spilled")
+	if err := iw.(io.Closer).Close(); err != nil {
+		t.Fatalf("Close entry: %v", err)
 	}
-	if got, max := fw.plain.InMemorySize(), uint64(maxInMemoryEntrySpoolSize); got > max {
-		t.Fatalf("in-memory size = %d, want <= %d", got, max)
-	}
-	tempPath := fw.plain.TempPath()
-	if tempPath == "" {
-		t.Fatalf("temp path empty after spill")
-	}
-	if _, err := os.Stat(tempPath); err != nil {
-		t.Fatalf("Stat temp file: %v", err)
-	}
-
 	if err := mw.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if _, err := os.Stat(tempPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("temp file after close err = %v, want %v", err, os.ErrNotExist)
-	}
 
-	rc, err := OpenReader(archivePath)
+	rc, err := OpenMultiReader(archivePath)
 	if err != nil {
-		t.Fatalf("OpenReader: %v", err)
+		t.Fatalf("OpenMultiReader: %v", err)
 	}
 	defer rc.Close()
 	if got, want := len(rc.File), 1; got != want {
@@ -622,48 +776,25 @@ func TestMultiVolumeWriterEntryBufferSpillsToDiskAndCleansUp(t *testing.T) {
 	}
 }
 
-func TestMultiVolumeWriterEntryBufferSpillTempFileRemovedOnCloseError(t *testing.T) {
-	archivePath := filepath.Join(t.TempDir(), "spill-multi-error.arj")
+func TestMultiVolumeWriterCompressedStreamingVolumeTooSmall(t *testing.T) {
+	archivePath := filepath.Join(t.TempDir(), "compressed-too-small.arj")
 	mw, err := NewMultiVolumeWriter(archivePath, MultiVolumeWriterOptions{
 		VolumeSize: 64,
-		BufferLimits: WriteBufferLimits{
-			MaxEntryBufferSize: maxInMemoryEntrySpoolSize + (2 << 20),
-		},
 	})
 	if err != nil {
 		t.Fatalf("NewMultiVolumeWriter: %v", err)
 	}
 
-	iw, err := mw.Create("spill.bin")
+	iw, err := mw.Create("stream.bin")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	fw := iw.(*multiVolumeFileWriter)
-
-	payload := bytes.Repeat([]byte{'e'}, int(maxInMemoryEntrySpoolSize)+(256<<10))
-	if n, err := fw.Write(payload); err != nil || n != len(payload) {
-		t.Fatalf("Write = (%d, %v), want (%d, nil)", n, err, len(payload))
-	}
-	if !fw.plain.Spilled() {
-		t.Fatalf("plain buffer not spilled")
-	}
-	tempPath := fw.plain.TempPath()
-	if tempPath == "" {
-		t.Fatalf("temp path empty after spill")
-	}
-	if _, err := os.Stat(tempPath); err != nil {
-		t.Fatalf("Stat temp file: %v", err)
-	}
-
-	if err := mw.Close(); !errors.Is(err, errVolumeTooSmall) {
-		t.Fatalf("Close error = %v, want %v", err, errVolumeTooSmall)
-	}
-	if _, err := os.Stat(tempPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("temp file after close err = %v, want %v", err, os.ErrNotExist)
+	if _, err := iw.Write([]byte("x")); !errors.Is(err, errVolumeTooSmall) {
+		t.Fatalf("Write error = %v, want %v", err, errVolumeTooSmall)
 	}
 }
 
-func TestMultiVolumeWriterMethod14InputBufferLimitOverride(t *testing.T) {
+func TestMultiVolumeWriterCompressedStreamingIgnoresMethod14InputLimit(t *testing.T) {
 	archivePath := filepath.Join(t.TempDir(), "method14-limit.arj")
 	mw, err := NewMultiVolumeWriter(archivePath, MultiVolumeWriterOptions{
 		VolumeSize: 32 * 1024,
@@ -684,8 +815,23 @@ func TestMultiVolumeWriterMethod14InputBufferLimitOverride(t *testing.T) {
 		t.Fatalf("Write = (%d, %v), want (10, nil)", n, err)
 	}
 
-	if err := iw.(*multiVolumeFileWriter).Close(); !errors.Is(err, ErrBufferLimitExceeded) {
-		t.Fatalf("Close error = %v, want %v", err, ErrBufferLimitExceeded)
+	if err := iw.(io.Closer).Close(); err != nil {
+		t.Fatalf("Close error = %v, want nil", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("Close writer: %v", err)
+	}
+
+	r, err := OpenMultiReader(archivePath)
+	if err != nil {
+		t.Fatalf("OpenMultiReader: %v", err)
+	}
+	defer r.Close()
+	if got, want := len(r.File), 1; got != want {
+		t.Fatalf("file count = %d, want %d", got, want)
+	}
+	if got := mustReadFileEntry(t, r.File[0]); string(got) != "0123456789" {
+		t.Fatalf("payload = %q, want %q", got, "0123456789")
 	}
 }
 

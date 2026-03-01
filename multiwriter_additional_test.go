@@ -393,7 +393,6 @@ func TestMultiVolumeWriterAddFSOpenFailureAbortsStagedEntry(t *testing.T) {
 		t.Fatalf("OpenMultiReader: %v", err)
 	}
 	defer r.Close()
-
 	if got, want := len(r.File), 1; got != want {
 		t.Fatalf("file count = %d, want %d", got, want)
 	}
@@ -422,28 +421,11 @@ func TestMultiVolumeWriterAddFSCopyFailureAbortsStagedEntry(t *testing.T) {
 		t.Fatalf("AddFS error = %v, want %v", err, wantErr)
 	}
 
-	fw, err := mw.Create("tail.txt")
-	if err != nil {
-		t.Fatalf("Create tail: %v", err)
+	if _, err := mw.Create("tail.txt"); !errors.Is(err, wantErr) {
+		t.Fatalf("Create tail error = %v, want wrapped %v", err, wantErr)
 	}
-	if _, err := fw.Write([]byte("tail")); err != nil {
-		t.Fatalf("Write tail: %v", err)
-	}
-	if err := mw.Close(); err != nil {
-		t.Fatalf("Close writer: %v", err)
-	}
-
-	r, err := OpenMultiReader(archivePath)
-	if err != nil {
-		t.Fatalf("OpenMultiReader: %v", err)
-	}
-	defer r.Close()
-
-	if got, want := len(r.File), 1; got != want {
-		t.Fatalf("file count = %d, want %d", got, want)
-	}
-	if got, want := r.File[0].Name, "tail.txt"; got != want {
-		t.Fatalf("entry name = %q, want %q", got, want)
+	if err := mw.Close(); !errors.Is(err, wantErr) {
+		t.Fatalf("Close writer error = %v, want wrapped %v", err, wantErr)
 	}
 }
 
@@ -548,7 +530,7 @@ func TestMultiVolumeWriterCompressorSnapshotPerEntry(t *testing.T) {
 	}
 }
 
-func TestMultiVolumeWriterBufferLimitSnapshotPerEntry(t *testing.T) {
+func TestMultiVolumeWriterCompressedStreamingUnaffectedByLimitChanges(t *testing.T) {
 	archivePath := filepath.Join(t.TempDir(), "snapshot-limits.arj")
 	mw, err := NewMultiVolumeWriter(archivePath, MultiVolumeWriterOptions{VolumeSize: 16 << 10})
 	if err != nil {
@@ -563,14 +545,14 @@ func TestMultiVolumeWriterBufferLimitSnapshotPerEntry(t *testing.T) {
 
 	mw.SetBufferLimits(WriteBufferLimits{MaxPlainEntryBufferSize: 16})
 	n, err := fw1.Write([]byte("abcdef"))
-	if got, want := n, 4; got != want {
+	if got, want := n, 6; got != want {
 		t.Fatalf("first write bytes = %d, want %d", got, want)
 	}
-	if !errors.Is(err, ErrBufferLimitExceeded) {
-		t.Fatalf("first write error = %v, want %v", err, ErrBufferLimitExceeded)
+	if err != nil {
+		t.Fatalf("first write error = %v, want nil", err)
 	}
-	if err := fw1.(io.Closer).Close(); !errors.Is(err, ErrBufferLimitExceeded) {
-		t.Fatalf("Close(first) error = %v, want %v", err, ErrBufferLimitExceeded)
+	if err := fw1.(io.Closer).Close(); err != nil {
+		t.Fatalf("Close(first): %v", err)
 	}
 
 	fw2, err := mw.Create("second.bin")
@@ -596,13 +578,19 @@ func TestMultiVolumeWriterBufferLimitSnapshotPerEntry(t *testing.T) {
 		t.Fatalf("OpenMultiReader: %v", err)
 	}
 	defer r.Close()
-	if got, want := len(r.File), 1; got != want {
+	if got, want := len(r.File), 2; got != want {
 		t.Fatalf("file count = %d, want %d", got, want)
 	}
-	if got, want := r.File[0].Name, "second.bin"; got != want {
+	if got, want := r.File[0].Name, "first.bin"; got != want {
+		t.Fatalf("entry[0] name = %q, want %q", got, want)
+	}
+	if got, want := r.File[1].Name, "second.bin"; got != want {
 		t.Fatalf("entry name = %q, want %q", got, want)
 	}
 	if got := mustReadFileEntry(t, r.File[0]); string(got) != "abcdef" {
+		t.Fatalf("first payload = %q, want %q", got, "abcdef")
+	}
+	if got := mustReadFileEntry(t, r.File[1]); string(got) != "abcdef" {
 		t.Fatalf("second payload = %q, want %q", got, "abcdef")
 	}
 }
@@ -853,8 +841,8 @@ func TestMultiVolumeWriterFlushAroundActiveWrites(t *testing.T) {
 	if err := mw.Flush(); err != nil {
 		t.Fatalf("Flush while entry active: %v", err)
 	}
-	if got, want := len(mw.Parts()), 0; got != want {
-		t.Fatalf("parts len during active write = %d, want %d", got, want)
+	if got := len(mw.Parts()); got < 1 {
+		t.Fatalf("parts len during active write = %d, want >= 1", got)
 	}
 
 	if err := fw.(io.Closer).Close(); err != nil {

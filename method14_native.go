@@ -1,7 +1,6 @@
 package arj
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 )
@@ -21,6 +20,8 @@ const (
 	methodNPT     = methodNT
 	methodCTable  = 4096
 	methodPTable  = 256
+
+	method14CompressorChunkSize = 64 << 10
 )
 
 type method14Input struct {
@@ -31,21 +32,42 @@ type method14Input struct {
 }
 
 type method14Compressor struct {
-	method uint16
-	dst    io.Writer
-	buf    *entryBuffer
-	limit  uint64
-	closed bool
+	method       uint16
+	dst          io.Writer
+	limit        uint64
+	written      uint64
+	fatalErr     error
+	pending      []byte
+	pendingOff   int
+	bw           *arjBitWriter
+	method123Enc method123BitEncoder
+	closed       bool
 }
 
 type method14ErrorReadCloser struct {
 	err error
 }
 
+type method14StreamingReadCloser struct {
+	method uint16
+	r      io.Reader
+	err    error
+}
+
+type method14BitReader interface {
+	fillBuf(n int) error
+	getBits(n int) (uint16, error)
+	peekBits(n int) (uint16, error)
+}
+
 type arjBitWriter struct {
 	out      []byte
+	dst      io.Writer
 	bitBuf   uint32
 	bitCount uint8
+	err      error
+	writeBuf [256]byte
+	writeN   int
 }
 
 type arjBitReader struct {
@@ -56,8 +78,19 @@ type arjBitReader struct {
 	err       error
 }
 
+type arjBitStreamReader struct {
+	r         io.Reader
+	remaining int64
+	bitPos    uint64
+	totalBits uint64
+	bitBuf    uint32
+	bitCount  uint8
+	err       error
+	scratch   [1]byte
+}
+
 type method123Decoder struct {
-	br        *arjBitReader
+	br        method14BitReader
 	blockSize int
 
 	ptLen   [methodNPT]uint8
@@ -66,6 +99,26 @@ type method123Decoder struct {
 	right   [2*methodNC - 1]uint16
 	cTable  [methodCTable]uint16
 	ptTable [methodPTable]uint16
+}
+
+type method123StreamDecoder struct {
+	dec       method123Decoder
+	dict      [methodDICSize]byte
+	dictPos   int
+	remaining uint64
+	matchSrc  int
+	matchLen  int
+	err       error
+}
+
+type method4StreamDecoder struct {
+	br        method14BitReader
+	dict      [methodFDIC]byte
+	dictPos   int
+	remaining uint64
+	matchSrc  int
+	matchLen  int
+	err       error
 }
 
 func isNativeMethod14(method uint16) bool {
@@ -89,11 +142,13 @@ func wrapMethod14DecompressorInput(in io.Reader, compressedSize int64, uncompres
 func compressorMethod14(method uint16) Compressor {
 	return func(w io.Writer) (io.WriteCloser, error) {
 		limit := DefaultMaxMethod14InputBufferSize
+		bw := newARJBitWriter(w)
 		return &method14Compressor{
-			method: method,
-			dst:    w,
-			buf:    newEntryBuffer(limit, bufferScopeMethod14Input),
-			limit:  limit,
+			method:       method,
+			dst:          w,
+			limit:        limit,
+			bw:           bw,
+			method123Enc: method123BitEncoder{bw: bw},
 		}, nil
 	}
 }
@@ -107,62 +162,76 @@ func decompressorMethod14(method uint16) Decompressor {
 			}
 		}
 
-		compressed, err := readMethod14CompressedPayload(ctx.Reader, ctx.compressedSize, ctx.limits)
-		if err != nil {
-			return &method14ErrorReadCloser{
-				err: fmt.Errorf("arj: method %d failed to read compressed payload: %w", method, err),
-			}
+		limits := normalizeMethod14DecodeLimits(ctx.limits)
+		if ctx.compressedSize < 0 {
+			return &method14ErrorReadCloser{err: ErrFormat}
 		}
-
-		plain, err := decompressMethod14PayloadWithLimits(method, compressed, ctx.uncompressedSize, ctx.limits)
-		if err != nil {
+		if err := validateMethod14DecodeBufferSizes(limits, uint64(ctx.compressedSize), ctx.uncompressedSize); err != nil {
 			return &method14ErrorReadCloser{err: err}
 		}
-		return io.NopCloser(bytes.NewReader(plain))
-	}
-}
+		if err := validateMethod14DecodeWorkingSet(uint64(ctx.compressedSize), ctx.uncompressedSize); err != nil {
+			return &method14ErrorReadCloser{err: err}
+		}
 
-func readMethod14CompressedPayload(r io.Reader, size int64, limits Method14DecodeLimits) ([]byte, error) {
-	const maxInt = int(^uint(0) >> 1)
-	limits = normalizeMethod14DecodeLimits(limits)
-	if size < 0 {
-		return nil, ErrFormat
+		br := newARJBitStreamReader(ctx.Reader, ctx.compressedSize)
+		switch method {
+		case Method1, Method2, Method3:
+			return &method14StreamingReadCloser{
+				method: method,
+				r:      newMethod123StreamDecoder(br, ctx.uncompressedSize),
+			}
+		case Method4:
+			return &method14StreamingReadCloser{
+				method: method,
+				r:      newMethod4StreamDecoder(br, ctx.uncompressedSize),
+			}
+		default:
+			return &method14ErrorReadCloser{err: ErrAlgorithm}
+		}
 	}
-	if uint64(size) > limits.MaxCompressedSize {
-		return nil, ErrFormat
-	}
-	if size > int64(maxInt) {
-		return nil, ErrFormat
-	}
-
-	buf := make([]byte, int(size))
-	if _, err := io.ReadFull(r, buf); err != nil {
-		return nil, err
-	}
-	return buf, nil
 }
 
 func (w *method14Compressor) Write(p []byte) (int, error) {
 	if w.closed {
 		return 0, fmt.Errorf("arj: write to closed compressor")
 	}
-	if w.buf == nil {
-		w.buf = newEntryBuffer(w.limit, bufferScopeMethod14Input)
+	if len(p) == 0 {
+		return 0, nil
 	}
-	return w.buf.Write(p)
+	if w.fatalErr != nil {
+		return 0, w.fatalErr
+	}
+	if w.bw == nil {
+		w.bw = newARJBitWriter(w.dst)
+		w.method123Enc = method123BitEncoder{bw: w.bw}
+	}
+	if w.written >= w.limit {
+		return 0, w.limitErr(len(p))
+	}
+
+	remaining := w.limit - w.written
+	chunk := p
+	limited := false
+	if uint64(len(chunk)) > remaining {
+		chunk = chunk[:int(remaining)]
+		limited = true
+	}
+	w.pending = append(w.pending, chunk...)
+	w.written += uint64(len(chunk))
+	if err := w.flushPendingFullChunks(); err != nil {
+		w.fatalErr = err
+		return len(chunk), err
+	}
+	if limited {
+		return len(chunk), w.limitErr(len(p))
+	}
+	return len(chunk), nil
 }
 
 func (w *method14Compressor) setMethod14InputBufferLimit(limit uint64) {
 	w.limit = normalizeWriteBufferLimits(WriteBufferLimits{
 		MaxMethod14InputBufferSize: limit,
 	}).MaxMethod14InputBufferSize
-	if w.buf != nil {
-		w.buf.limit = w.limit
-		w.buf.memLimit = w.limit
-		if w.buf.memLimit > maxInMemoryEntrySpoolSize {
-			w.buf.memLimit = maxInMemoryEntrySpoolSize
-		}
-	}
 }
 
 func (w *method14Compressor) Close() error {
@@ -170,41 +239,85 @@ func (w *method14Compressor) Close() error {
 		return nil
 	}
 	w.closed = true
-	if w.buf == nil {
-		w.buf = newEntryBuffer(w.limit, bufferScopeMethod14Input)
+	if w.fatalErr != nil {
+		return w.fatalErr
 	}
-	defer func() { _ = w.buf.Close() }()
-
-	plain, err := method14ReadCompressorInput(w.buf)
-	if err != nil {
+	if w.bw == nil {
+		w.bw = newARJBitWriter(w.dst)
+		w.method123Enc = method123BitEncoder{bw: w.bw}
+	}
+	if err := w.flushAllPending(); err != nil {
+		w.fatalErr = err
 		return err
 	}
-	compressed, err := compressMethod14Payload(w.method, plain)
-	if err != nil {
-		return err
-	}
-	n, err := w.dst.Write(compressed)
-	if err != nil {
-		return err
-	}
-	if n != len(compressed) {
-		return io.ErrShortWrite
+	_ = w.bw.finishWithShutdownPadding()
+	if w.bw.err != nil {
+		w.fatalErr = w.bw.err
+		return w.fatalErr
 	}
 	return nil
 }
 
-func method14ReadCompressorInput(buf *entryBuffer) ([]byte, error) {
-	if buf == nil || buf.Size() == 0 {
-		return nil, nil
+func (w *method14Compressor) limitErr(attempted int) *BufferLimitError {
+	return &BufferLimitError{
+		Scope:     bufferScopeMethod14Input,
+		Limit:     w.limit,
+		Buffered:  w.written,
+		Attempted: uint64(attempted),
 	}
-	if buf.file == nil {
-		return buf.mem.Bytes(), nil
+}
+
+func (w *method14Compressor) flushPendingFullChunks() error {
+	for len(w.pending)-w.pendingOff >= method14CompressorChunkSize {
+		chunk := w.pending[w.pendingOff : w.pendingOff+method14CompressorChunkSize]
+		if err := w.encodeChunk(chunk); err != nil {
+			return err
+		}
+		w.pendingOff += method14CompressorChunkSize
 	}
-	const maxInt = int(^uint(0) >> 1)
-	if buf.Size() > uint64(maxInt) {
-		return nil, ErrBufferLimitExceeded
+	w.compactPending()
+	return nil
+}
+
+func (w *method14Compressor) flushAllPending() error {
+	for w.pendingOff < len(w.pending) {
+		chunk := w.pending[w.pendingOff:]
+		if err := w.encodeChunk(chunk); err != nil {
+			return err
+		}
+		w.pendingOff = len(w.pending)
 	}
-	return buf.sliceAt(0, int(buf.Size()))
+	w.compactPending()
+	return nil
+}
+
+func (w *method14Compressor) compactPending() {
+	if w.pendingOff == 0 {
+		return
+	}
+	if w.pendingOff >= len(w.pending) {
+		w.pending = w.pending[:0]
+		w.pendingOff = 0
+		return
+	}
+	copy(w.pending, w.pending[w.pendingOff:])
+	w.pending = w.pending[:len(w.pending)-w.pendingOff]
+	w.pendingOff = 0
+}
+
+func (w *method14Compressor) encodeChunk(chunk []byte) error {
+	if len(chunk) == 0 {
+		return nil
+	}
+	switch w.method {
+	case Method1, Method2, Method3:
+		method123TokenizeGreedyBlocks(chunk, w.method123Enc.writeBlock)
+	case Method4:
+		encodeMethod4NativeToBitWriter(w.bw, chunk)
+	default:
+		return ErrAlgorithm
+	}
+	return w.bw.err
 }
 
 func (r *method14ErrorReadCloser) Read([]byte) (int, error) {
@@ -212,6 +325,25 @@ func (r *method14ErrorReadCloser) Read([]byte) (int, error) {
 }
 
 func (r *method14ErrorReadCloser) Close() error {
+	return nil
+}
+
+func (r *method14StreamingReadCloser) Read(p []byte) (int, error) {
+	if r.err != nil {
+		return 0, r.err
+	}
+	n, err := r.r.Read(p)
+	if err != nil && err != io.EOF {
+		err = fmt.Errorf("arj: method %d decompression failed: %w", r.method, err)
+		r.err = err
+	}
+	return n, err
+}
+
+func (r *method14StreamingReadCloser) Close() error {
+	if closer, ok := r.r.(io.Closer); ok {
+		return closer.Close()
+	}
 	return nil
 }
 
@@ -328,82 +460,7 @@ func decodeMethod123(compressed []byte, origSize uint64, limits Method14DecodeLi
 	if origSize == 0 {
 		return nil, nil
 	}
-
-	dec := &method123Decoder{
-		br: newARJBitReader(compressed),
-	}
-	dict := make([]byte, methodDICSize)
-	out := make([]byte, int(origSize))
-	outPos := 0
-
-	count := origSize
-	r := 0
-	for count > 0 {
-		c, err := dec.decodeC()
-		if err != nil {
-			return nil, err
-		}
-		if c <= 0xFF {
-			b := byte(c)
-			dict[r] = b
-			out[outPos] = b
-			outPos++
-			count--
-			r++
-			if r >= methodDICSize {
-				r = 0
-			}
-			continue
-		}
-
-		j := c - (0xFF + 1 - methodThresh)
-		if j <= 0 || uint64(j) > count {
-			return nil, ErrFormat
-		}
-		count -= uint64(j)
-
-		p, err := dec.decodeP()
-		if err != nil {
-			return nil, err
-		}
-		if p >= methodDICSize {
-			return nil, ErrFormat
-		}
-		i := r - p - 1
-		if i < 0 {
-			i += methodDICSize
-		}
-		matchLen := j
-		if method14CanFastMatchCopy(i, r, matchLen, methodDICSize) {
-			src := dict[i : i+matchLen]
-			copy(dict[r:r+matchLen], src)
-			copy(out[outPos:outPos+matchLen], src)
-
-			outPos += matchLen
-			r += matchLen
-			if r == methodDICSize {
-				r = 0
-			}
-			continue
-		}
-
-		for ; j > 0; j-- {
-			b := dict[i]
-			dict[r] = b
-			out[outPos] = b
-			outPos++
-
-			r++
-			if r >= methodDICSize {
-				r = 0
-			}
-			i++
-			if i >= methodDICSize {
-				i = 0
-			}
-		}
-	}
-	return out, nil
+	return io.ReadAll(newMethod123StreamDecoder(newARJBitReader(compressed), origSize))
 }
 
 func decodeMethod4(compressed []byte, origSize uint64, limits Method14DecodeLimits) ([]byte, error) {
@@ -413,89 +470,10 @@ func decodeMethod4(compressed []byte, origSize uint64, limits Method14DecodeLimi
 	if origSize == 0 {
 		return nil, nil
 	}
-
-	br := newARJBitReader(compressed)
-	dict := make([]byte, methodFDIC)
-	out := make([]byte, int(origSize))
-	outPos := 0
-
-	var produced uint64
-	r := 0
-	for produced < origSize {
-		c, err := decodeMethod4Len(br)
-		if err != nil {
-			return nil, err
-		}
-		if c == 0 {
-			literal, err := br.getBits(8)
-			if err != nil {
-				return nil, err
-			}
-			b := byte(literal)
-
-			dict[r] = b
-			out[outPos] = b
-			outPos++
-			produced++
-
-			r++
-			if r >= methodFDIC {
-				r = 0
-			}
-			continue
-		}
-
-		j := c - 1 + methodThresh
-		if j <= 0 || uint64(j) > origSize-produced {
-			return nil, ErrFormat
-		}
-		produced += uint64(j)
-
-		p, err := decodeMethod4Ptr(br)
-		if err != nil {
-			return nil, err
-		}
-		if p >= methodFDIC {
-			return nil, ErrFormat
-		}
-		i := r - p - 1
-		if i < 0 {
-			i += methodFDIC
-		}
-		matchLen := j
-		if method14CanFastMatchCopy(i, r, matchLen, methodFDIC) {
-			src := dict[i : i+matchLen]
-			copy(dict[r:r+matchLen], src)
-			copy(out[outPos:outPos+matchLen], src)
-
-			outPos += matchLen
-			r += matchLen
-			if r == methodFDIC {
-				r = 0
-			}
-			continue
-		}
-
-		for ; j > 0; j-- {
-			b := dict[i]
-			dict[r] = b
-			out[outPos] = b
-			outPos++
-
-			r++
-			if r >= methodFDIC {
-				r = 0
-			}
-			i++
-			if i >= methodFDIC {
-				i = 0
-			}
-		}
-	}
-	return out, nil
+	return io.ReadAll(newMethod4StreamDecoder(newARJBitReader(compressed), origSize))
 }
 
-func decodeMethod4Ptr(br *arjBitReader) (int, error) {
+func decodeMethod4Ptr(br method14BitReader) (int, error) {
 	plus := 0
 	pwr := 1 << 9
 	c := 0
@@ -524,7 +502,7 @@ func decodeMethod4Ptr(br *arjBitReader) (int, error) {
 	return c, nil
 }
 
-func decodeMethod4Len(br *arjBitReader) (int, error) {
+func decodeMethod4Len(br method14BitReader) (int, error) {
 	plus := 0
 	pwr := 1
 	c := 0
@@ -563,6 +541,190 @@ func method14CanFastMatchCopy(src, dst, n, dictSize int) bool {
 	return src+n <= dst || dst+n <= src
 }
 
+func newMethod123StreamDecoder(br method14BitReader, origSize uint64) *method123StreamDecoder {
+	d := &method123StreamDecoder{
+		remaining: origSize,
+	}
+	d.dec.br = br
+	return d
+}
+
+func (d *method123StreamDecoder) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		if d.err != nil {
+			return 0, d.err
+		}
+		return 0, nil
+	}
+	if d.err != nil {
+		return 0, d.err
+	}
+	if d.remaining == 0 {
+		return 0, io.EOF
+	}
+
+	n := 0
+	for n < len(p) && d.remaining > 0 {
+		if d.matchLen > 0 {
+			b := d.dict[d.matchSrc]
+			d.dict[d.dictPos] = b
+			p[n] = b
+			n++
+			d.remaining--
+			d.dictPos++
+			if d.dictPos >= methodDICSize {
+				d.dictPos = 0
+			}
+			d.matchSrc++
+			if d.matchSrc >= methodDICSize {
+				d.matchSrc = 0
+			}
+			d.matchLen--
+			continue
+		}
+
+		c, err := d.dec.decodeC()
+		if err != nil {
+			d.err = err
+			break
+		}
+		if c <= 0xFF {
+			b := byte(c)
+			d.dict[d.dictPos] = b
+			p[n] = b
+			n++
+			d.remaining--
+			d.dictPos++
+			if d.dictPos >= methodDICSize {
+				d.dictPos = 0
+			}
+			continue
+		}
+
+		j := c - (0xFF + 1 - methodThresh)
+		if j <= 0 || uint64(j) > d.remaining {
+			d.err = ErrFormat
+			break
+		}
+		ptr, err := d.dec.decodeP()
+		if err != nil {
+			d.err = err
+			break
+		}
+		if ptr >= methodDICSize {
+			d.err = ErrFormat
+			break
+		}
+		d.matchSrc = d.dictPos - ptr - 1
+		if d.matchSrc < 0 {
+			d.matchSrc += methodDICSize
+		}
+		d.matchLen = j
+	}
+
+	if n > 0 {
+		return n, nil
+	}
+	if d.err != nil {
+		return 0, d.err
+	}
+	return 0, io.EOF
+}
+
+func newMethod4StreamDecoder(br method14BitReader, origSize uint64) *method4StreamDecoder {
+	return &method4StreamDecoder{
+		br:        br,
+		remaining: origSize,
+	}
+}
+
+func (d *method4StreamDecoder) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		if d.err != nil {
+			return 0, d.err
+		}
+		return 0, nil
+	}
+	if d.err != nil {
+		return 0, d.err
+	}
+	if d.remaining == 0 {
+		return 0, io.EOF
+	}
+
+	n := 0
+	for n < len(p) && d.remaining > 0 {
+		if d.matchLen > 0 {
+			b := d.dict[d.matchSrc]
+			d.dict[d.dictPos] = b
+			p[n] = b
+			n++
+			d.remaining--
+			d.dictPos++
+			if d.dictPos >= methodFDIC {
+				d.dictPos = 0
+			}
+			d.matchSrc++
+			if d.matchSrc >= methodFDIC {
+				d.matchSrc = 0
+			}
+			d.matchLen--
+			continue
+		}
+
+		c, err := decodeMethod4Len(d.br)
+		if err != nil {
+			d.err = err
+			break
+		}
+		if c == 0 {
+			literal, err := d.br.getBits(8)
+			if err != nil {
+				d.err = err
+				break
+			}
+			b := byte(literal)
+			d.dict[d.dictPos] = b
+			p[n] = b
+			n++
+			d.remaining--
+			d.dictPos++
+			if d.dictPos >= methodFDIC {
+				d.dictPos = 0
+			}
+			continue
+		}
+
+		j := c - 1 + methodThresh
+		if j <= 0 || uint64(j) > d.remaining {
+			d.err = ErrFormat
+			break
+		}
+		ptr, err := decodeMethod4Ptr(d.br)
+		if err != nil {
+			d.err = err
+			break
+		}
+		if ptr >= methodFDIC {
+			d.err = ErrFormat
+			break
+		}
+		d.matchSrc = d.dictPos - ptr - 1
+		if d.matchSrc < 0 {
+			d.matchSrc += methodFDIC
+		}
+		d.matchLen = j
+	}
+
+	if n > 0 {
+		return n, nil
+	}
+	if d.err != nil {
+		return 0, d.err
+	}
+	return 0, io.EOF
+}
+
 func (d *method123Decoder) decodeC() (int, error) {
 	if d.blockSize == 0 {
 		blockSize, err := d.br.getBits(methodCodeBit)
@@ -588,14 +750,18 @@ func (d *method123Decoder) decodeC() (int, error) {
 	}
 	d.blockSize--
 
-	j := int(d.cTable[d.br.bitBuf>>4])
+	peek, err := d.br.peekBits(methodCodeBit)
+	if err != nil {
+		return 0, err
+	}
+	j := int(d.cTable[peek>>4])
 	if j >= methodNC {
 		mask := uint16(1 << 3)
 		for steps := 0; j >= methodNC; steps++ {
 			if steps > len(d.left) || j < 0 || j >= len(d.left) {
 				return 0, ErrFormat
 			}
-			if d.br.bitBuf&mask != 0 {
+			if peek&mask != 0 {
 				j = int(d.right[j])
 			} else {
 				j = int(d.left[j])
@@ -613,14 +779,18 @@ func (d *method123Decoder) decodeC() (int, error) {
 }
 
 func (d *method123Decoder) decodeP() (int, error) {
-	j := int(d.ptTable[d.br.bitBuf>>8])
+	peek, err := d.br.peekBits(methodCodeBit)
+	if err != nil {
+		return 0, err
+	}
+	j := int(d.ptTable[peek>>8])
 	if j >= methodNP {
 		mask := uint16(1 << 7)
 		for steps := 0; j >= methodNP; steps++ {
 			if steps > len(d.left) || j < 0 || j >= len(d.left) {
 				return 0, ErrFormat
 			}
-			if d.br.bitBuf&mask != 0 {
+			if peek&mask != 0 {
 				j = int(d.right[j])
 			} else {
 				j = int(d.left[j])
@@ -677,10 +847,14 @@ func (d *method123Decoder) readPtLen(nn, nbit, iSpecial int) error {
 		n = methodNPT
 	}
 	for i < n {
-		c := int(d.br.bitBuf >> 13)
+		peek, err := d.br.peekBits(methodCodeBit)
+		if err != nil {
+			return err
+		}
+		c := int(peek >> 13)
 		if c == 7 {
 			mask := uint16(1 << 12)
-			for mask&d.br.bitBuf != 0 {
+			for mask&peek != 0 {
 				mask >>= 1
 				c++
 			}
@@ -749,14 +923,18 @@ func (d *method123Decoder) readCLen() error {
 
 	i := 0
 	for i < n {
-		c := int(d.ptTable[d.br.bitBuf>>8])
+		peek, err := d.br.peekBits(methodCodeBit)
+		if err != nil {
+			return err
+		}
+		c := int(d.ptTable[peek>>8])
 		if c >= methodNT {
 			mask := uint16(1 << 7)
 			for steps := 0; c >= methodNT; steps++ {
 				if steps > len(d.left) || c < 0 || c >= len(d.left) {
 					return ErrFormat
 				}
-				if d.br.bitBuf&mask != 0 {
+				if peek&mask != 0 {
 					c = int(d.right[c])
 				} else {
 					c = int(d.left[c])
@@ -941,6 +1119,23 @@ func newARJBitReader(data []byte) *arjBitReader {
 	return br
 }
 
+func newARJBitStreamReader(r io.Reader, compressedSize int64) *arjBitStreamReader {
+	br := &arjBitStreamReader{
+		r:         r,
+		remaining: compressedSize,
+	}
+	if compressedSize >= 0 {
+		br.totalBits = uint64(compressedSize) << 3
+	} else {
+		br.err = ErrFormat
+	}
+	return br
+}
+
+func newARJBitWriter(dst io.Writer) *arjBitWriter {
+	return &arjBitWriter{dst: dst}
+}
+
 func (br *arjBitReader) refreshBitBuf() {
 	bytePos := int(br.bitPos >> 3)
 	bitOffset := uint(br.bitPos & 7)
@@ -958,6 +1153,20 @@ func (br *arjBitReader) refreshBitBuf() {
 
 	window <<= bitOffset
 	br.bitBuf = uint16(window >> 8)
+}
+
+func (br *arjBitReader) peekBits(n int) (uint16, error) {
+	if n < 0 || n > methodCodeBit || br.bitPos > br.totalBits {
+		br.err = ErrFormat
+		return 0, br.err
+	}
+	if n == 0 {
+		return 0, nil
+	}
+	if br.err != nil {
+		return 0, br.err
+	}
+	return br.bitBuf >> (methodCodeBit - n), nil
 }
 
 func method14AdvanceBitPos(bitPos, totalBits uint64, n int) (uint64, bool) {
@@ -1012,8 +1221,151 @@ func (br *arjBitReader) getBits(n int) (uint16, error) {
 	return v, nil
 }
 
-func (bw *arjBitWriter) putBits(n int, x uint16) {
+func method14LowBitMask32(n int) uint32 {
 	if n <= 0 {
+		return 0
+	}
+	if n >= 32 {
+		return ^uint32(0)
+	}
+	return (uint32(1) << n) - 1
+}
+
+func (br *arjBitStreamReader) fillLookahead(n int) error {
+	if n <= 0 {
+		return nil
+	}
+	if br.err != nil {
+		return br.err
+	}
+	for int(br.bitCount) < n && br.remaining > 0 {
+		if _, err := io.ReadFull(br.r, br.scratch[:]); err != nil {
+			br.err = ErrFormat
+			return br.err
+		}
+		br.remaining--
+		br.bitBuf <<= 8
+		br.bitBuf |= uint32(br.scratch[0])
+		br.bitCount += 8
+	}
+	return nil
+}
+
+func (br *arjBitStreamReader) peekBits(n int) (uint16, error) {
+	if n < 0 || n > methodCodeBit || br.bitPos > br.totalBits {
+		br.err = ErrFormat
+		return 0, br.err
+	}
+	if n == 0 {
+		return 0, nil
+	}
+	if err := br.fillLookahead(n); err != nil {
+		return 0, err
+	}
+
+	if int(br.bitCount) >= n {
+		shift := int(br.bitCount) - n
+		return uint16((br.bitBuf >> shift) & method14LowBitMask32(n)), nil
+	}
+	if br.bitCount == 0 {
+		return 0, nil
+	}
+	return uint16((br.bitBuf << (n - int(br.bitCount))) & method14LowBitMask32(n)), nil
+}
+
+func (br *arjBitStreamReader) fillBuf(n int) error {
+	nextPos, ok := method14AdvanceBitPos(br.bitPos, br.totalBits, n)
+	if !ok {
+		br.err = ErrFormat
+		return br.err
+	}
+	if n == 0 {
+		return nil
+	}
+	if br.err != nil {
+		return br.err
+	}
+	if err := br.fillLookahead(n); err != nil {
+		return err
+	}
+	if int(br.bitCount) < n {
+		br.err = ErrFormat
+		return br.err
+	}
+	br.bitCount -= uint8(n)
+	br.bitPos = nextPos
+	if br.bitCount == 0 {
+		br.bitBuf = 0
+	} else {
+		br.bitBuf &= method14LowBitMask32(int(br.bitCount))
+	}
+	return nil
+}
+
+func (br *arjBitStreamReader) getBits(n int) (uint16, error) {
+	nextPos, ok := method14AdvanceBitPos(br.bitPos, br.totalBits, n)
+	if !ok {
+		br.err = ErrFormat
+		return 0, br.err
+	}
+	if n == 0 {
+		return 0, nil
+	}
+	if br.err != nil {
+		return 0, br.err
+	}
+	if err := br.fillLookahead(n); err != nil {
+		return 0, err
+	}
+	if int(br.bitCount) < n {
+		br.err = ErrFormat
+		return 0, br.err
+	}
+	shift := int(br.bitCount) - n
+	v := uint16((br.bitBuf >> shift) & method14LowBitMask32(n))
+	br.bitCount -= uint8(n)
+	br.bitPos = nextPos
+	if br.bitCount == 0 {
+		br.bitBuf = 0
+	} else {
+		br.bitBuf &= method14LowBitMask32(int(br.bitCount))
+	}
+	return v, nil
+}
+
+func (bw *arjBitWriter) emitByte(b byte) {
+	if bw.err != nil {
+		return
+	}
+	if bw.dst == nil {
+		bw.out = append(bw.out, b)
+		return
+	}
+	bw.writeBuf[bw.writeN] = b
+	bw.writeN++
+	if bw.writeN == len(bw.writeBuf) {
+		bw.flushOutput()
+	}
+}
+
+func (bw *arjBitWriter) flushOutput() {
+	if bw.err != nil || bw.dst == nil || bw.writeN == 0 {
+		return
+	}
+	n, err := bw.dst.Write(bw.writeBuf[:bw.writeN])
+	if err != nil {
+		bw.err = err
+		return
+	}
+	if n != bw.writeN {
+		bw.err = io.ErrShortWrite
+		return
+	}
+	bw.writeN = 0
+}
+
+func (bw *arjBitWriter) putBits(n int, x uint16) {
+	if n <= 0 || bw.err != nil {
 		return
 	}
 
@@ -1027,7 +1379,10 @@ func (bw *arjBitWriter) putBits(n int, x uint16) {
 
 	for bw.bitCount >= 8 {
 		shift := bw.bitCount - 8
-		bw.out = append(bw.out, byte(bw.bitBuf>>shift))
+		bw.emitByte(byte(bw.bitBuf >> shift))
+		if bw.err != nil {
+			return
+		}
 		bw.bitCount -= 8
 		if bw.bitCount == 0 {
 			bw.bitBuf = 0
@@ -1039,5 +1394,6 @@ func (bw *arjBitWriter) putBits(n int, x uint16) {
 
 func (bw *arjBitWriter) finishWithShutdownPadding() []byte {
 	bw.putBits(7, 0)
+	bw.flushOutput()
 	return bw.out
 }

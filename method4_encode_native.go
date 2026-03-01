@@ -121,11 +121,17 @@ func method4ReleasePrevWide(prev []int) {
 
 func encodeMethod4Native(plain []byte) []byte {
 	var bw arjBitWriter
+	encodeMethod4NativeToBitWriter(&bw, plain)
+	return bw.finishWithShutdownPadding()
+}
+
+func encodeMethod4NativeToBitWriter(bw *arjBitWriter, plain []byte) {
 	if len(plain) == 0 {
-		return bw.finishWithShutdownPadding()
+		return
 	}
 	if len(plain) > int(method4MaxNarrowPos) {
-		return encodeMethod4NativeWide(plain)
+		encodeMethod4NativeWideToBitWriter(bw, plain)
+		return
 	}
 
 	head := method4AcquireHead32()
@@ -136,8 +142,8 @@ func encodeMethod4Native(plain []byte) []byte {
 	for i := 0; i < len(plain); {
 		bestLen, bestDist := method4FindBestMatch(plain, head, prev, i)
 		if bestLen >= method4MinMatch {
-			enc4Pass1(&bw, bestLen-(methodThresh-1))
-			enc4Pass2(&bw, bestDist-1)
+			enc4Pass1(bw, bestLen-(methodThresh-1))
+			enc4Pass2(bw, bestDist-1)
 
 			for j := 0; j < bestLen; j++ {
 				method4InsertHash(plain, head, prev, i+j)
@@ -151,13 +157,15 @@ func encodeMethod4Native(plain []byte) []byte {
 		method4InsertHash(plain, head, prev, i)
 		i++
 	}
-
-	return bw.finishWithShutdownPadding()
 }
 
 func encodeMethod4NativeWide(plain []byte) []byte {
 	var bw arjBitWriter
+	encodeMethod4NativeWideToBitWriter(&bw, plain)
+	return bw.finishWithShutdownPadding()
+}
 
+func encodeMethod4NativeWideToBitWriter(bw *arjBitWriter, plain []byte) {
 	head := method4AcquireHeadWide()
 	defer method4ReleaseHeadWide(head)
 	prev := method4AcquirePrevWide(len(plain))
@@ -166,8 +174,8 @@ func encodeMethod4NativeWide(plain []byte) []byte {
 	for i := 0; i < len(plain); {
 		bestLen, bestDist := method4FindBestMatchWide(plain, head, prev, i)
 		if bestLen >= method4MinMatch {
-			enc4Pass1(&bw, bestLen-(methodThresh-1))
-			enc4Pass2(&bw, bestDist-1)
+			enc4Pass1(bw, bestLen-(methodThresh-1))
+			enc4Pass2(bw, bestDist-1)
 
 			for j := 0; j < bestLen; j++ {
 				method4InsertHashWide(plain, head, prev, i+j)
@@ -181,8 +189,6 @@ func encodeMethod4NativeWide(plain []byte) []byte {
 		method4InsertHashWide(plain, head, prev, i)
 		i++
 	}
-
-	return bw.finishWithShutdownPadding()
 }
 
 func method4FindBestMatch(plain []byte, head, prev []int32, pos int) (bestLen int, bestDist int) {

@@ -26,7 +26,7 @@ type method123HuffmanTree struct {
 }
 
 type method123BitEncoder struct {
-	bw arjBitWriter
+	bw *arjBitWriter
 }
 
 func encodeMethod123Native(plain []byte) []byte {
@@ -34,10 +34,11 @@ func encodeMethod123Native(plain []byte) []byte {
 		return nil
 	}
 
-	enc := method123BitEncoder{}
+	bw := arjBitWriter{}
+	enc := method123BitEncoder{bw: &bw}
 	method123TokenizeGreedyBlocks(plain, enc.writeBlock)
 
-	return enc.bw.finishWithShutdownPadding()
+	return bw.finishWithShutdownPadding()
 }
 
 var (

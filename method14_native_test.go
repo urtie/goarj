@@ -193,7 +193,7 @@ func TestMethod14CompressorDefaultInputLimitGuard(t *testing.T) {
 
 	// Simulate a full compressor input buffer so this test remains fast and
 	// stable regardless of default limit value.
-	mc.buf.size = mc.limit
+	mc.written = mc.limit
 	n, err := cw.Write([]byte("m"))
 	if got, want := n, 0; got != want {
 		t.Fatalf("Write bytes = %d, want %d", got, want)
@@ -267,6 +267,103 @@ func TestMethod14CompressorCloseFailsOnShortWrite(t *testing.T) {
 
 	if err := cw.Close(); !errors.Is(err, io.ErrShortWrite) {
 		t.Fatalf("Close error = %v, want %v", err, io.ErrShortWrite)
+	}
+}
+
+func TestMethod14CompressorStreamsChunksBeforeClose(t *testing.T) {
+	payload := make([]byte, (2*method14CompressorChunkSize)+123)
+	var x uint32 = 1
+	for i := range payload {
+		x = x*1664525 + 1013904223
+		payload[i] = byte(x >> 24)
+	}
+
+	var dst countingBufferWriter
+	cw, err := compressorMethod14(Method1)(&dst)
+	if err != nil {
+		t.Fatalf("compressorMethod14: %v", err)
+	}
+
+	n, err := cw.Write(payload)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got, want := n, len(payload); got != want {
+		t.Fatalf("Write bytes = %d, want %d", got, want)
+	}
+
+	if dst.writes == 0 {
+		t.Fatalf("compressor did not emit streamed output during Write")
+	}
+
+	mc := cw.(*method14Compressor)
+	if got := len(mc.pending) - mc.pendingOff; got >= method14CompressorChunkSize {
+		t.Fatalf("pending input = %d, want < %d", got, method14CompressorChunkSize)
+	}
+
+	if err := cw.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	roundTrip, err := decompressMethod14Payload(Method1, dst.Bytes(), uint64(len(payload)))
+	if err != nil {
+		t.Fatalf("decompress: %v", err)
+	}
+	if !bytes.Equal(roundTrip, payload) {
+		t.Fatalf("payload mismatch")
+	}
+}
+
+func TestMethod14DecompressorStreamsOnRead(t *testing.T) {
+	payload := make([]byte, 200000)
+	var x uint32 = 7
+	for i := range payload {
+		x = x*1664525 + 1013904223
+		payload[i] = byte(x >> 24)
+	}
+
+	compressed, err := compressMethod14Payload(Method1, payload)
+	if err != nil {
+		t.Fatalf("compress: %v", err)
+	}
+
+	src := &countingReader{
+		r: bytes.NewReader(compressed),
+	}
+	rc := decompressorMethod14(Method1)(wrapMethod14DecompressorInput(
+		src,
+		int64(len(compressed)),
+		uint64(len(payload)),
+		Method14DecodeLimits{},
+	))
+	defer func() { _ = rc.Close() }()
+
+	if src.calls != 0 {
+		t.Fatalf("decompressor read eagerly before first Read call")
+	}
+
+	head := make([]byte, 32)
+	n, err := rc.Read(head)
+	if n == 0 {
+		t.Fatalf("first Read returned n=0")
+	}
+	if err != nil && err != io.EOF {
+		t.Fatalf("first Read error = %v, want nil/EOF", err)
+	}
+	if src.calls == 0 {
+		t.Fatalf("decompressor did not read source on first Read")
+	}
+	if src.bytesRead >= len(compressed) {
+		t.Fatalf("decompressor consumed full compressed payload on first Read")
+	}
+
+	tail, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll tail: %v", err)
+	}
+	full := append(head[:n], tail...)
+	if !bytes.Equal(full, payload) {
+		t.Fatalf("payload mismatch")
 	}
 }
 
@@ -425,6 +522,33 @@ func (w *nilErrShortWriter) Write(p []byte) (int, error) {
 		return len(p), nil
 	}
 	return w.maxBytes, nil
+}
+
+type countingBufferWriter struct {
+	buf    bytes.Buffer
+	writes int
+}
+
+func (w *countingBufferWriter) Write(p []byte) (int, error) {
+	w.writes++
+	return w.buf.Write(p)
+}
+
+func (w *countingBufferWriter) Bytes() []byte {
+	return w.buf.Bytes()
+}
+
+type countingReader struct {
+	r         io.Reader
+	calls     int
+	bytesRead int
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	r.calls++
+	n, err := r.r.Read(p)
+	r.bytesRead += n
+	return n, err
 }
 
 type referenceARJBitWriter struct {

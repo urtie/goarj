@@ -125,6 +125,7 @@ type method14InputLimitSetter interface {
 // Writer implements an ARJ file writer.
 type Writer struct {
 	cw           *countWriter
+	streamSeeker io.WriteSeeker
 	last         *fileWriter
 	closed       bool
 	failed       error
@@ -145,10 +146,19 @@ type Writer struct {
 func NewWriter(w io.Writer) *Writer {
 	limits := normalizeWriteBufferLimits(WriteBufferLimits{})
 	now := time.Now().UTC()
+	cw := &countWriter{}
+	var streamSeeker io.WriteSeeker
+	if seeker, ok := w.(io.WriteSeeker); ok {
+		cw.w = seeker
+		streamSeeker = seeker
+	} else {
+		cw.w = bufio.NewWriter(w)
+	}
 	writer := &Writer{
-		cw:          &countWriter{w: bufio.NewWriter(w)},
-		bufferLimit: limits,
-		defaultTime: now,
+		cw:           cw,
+		streamSeeker: streamSeeker,
+		bufferLimit:  limits,
+		defaultTime:  now,
 	}
 	writer.compressorV.Store((map[uint16]Compressor)(nil))
 	writer.bufferLimitV.Store(limits)
@@ -404,16 +414,39 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.Writer, error) {
 	limits := w.writeBufferLimits()
 	fw.entryBufferLimit = limits.MaxCompressedEntryBufferSize
 	fw.method14InputLimit = limits.MaxMethod14InputBufferSize
-	fw.comp = newEntryBuffer(fw.entryBufferLimit, bufferScopeWriterEntryCompressed)
 
-	cw, err := comp(fw.comp)
-	if err != nil {
-		return nil, err
+	if w.streamSeeker != nil && !h.isDir() {
+		fw.streaming = true
+		fw.streamSink = newEntryStreamSink(w.cw, 0, bufferScopeWriterEntryCompressed)
+		cw, err := comp(fw.streamSink)
+		if err != nil {
+			return nil, err
+		}
+		if setter, ok := cw.(method14InputLimitSetter); ok {
+			setter.setMethod14InputBufferLimit(fw.method14InputLimit)
+		}
+		fw.localHeaderOffset = w.cw.Count()
+
+		fw.h.UncompressedSize64 = 0
+		fw.h.CompressedSize64 = 0
+		fw.h.CRC32 = 0
+		if err := writeLocalFileHeader(w.cw, fw.h); err != nil {
+			_ = cw.Close()
+			return nil, err
+		}
+		fw.cw = cw
+	} else {
+		fw.comp = newEntryBuffer(fw.entryBufferLimit, bufferScopeWriterEntryCompressed)
+		cw, err := comp(fw.comp)
+		if err != nil {
+			return nil, err
+		}
+		if setter, ok := cw.(method14InputLimitSetter); ok {
+			setter.setMethod14InputBufferLimit(fw.method14InputLimit)
+		}
+		fw.cw = cw
 	}
-	if setter, ok := cw.(method14InputLimitSetter); ok {
-		setter.setMethod14InputBufferLimit(fw.method14InputLimit)
-	}
-	fw.cw = cw
+
 	w.last = fw
 	return fw, nil
 }
@@ -588,7 +621,10 @@ type fileWriter struct {
 	w                  *Writer
 	h                  *FileHeader
 	cw                 io.WriteCloser
+	streamSink         *entryStreamSink
 	comp               *entryBuffer
+	streaming          bool
+	localHeaderOffset  int64
 	plainN             uint64
 	entryBufferLimit   uint64
 	method14InputLimit uint64
@@ -607,6 +643,22 @@ func (w *fileWriter) latchWriteErr(err error) {
 		return
 	}
 	w.writeErr = err
+}
+
+func (w *fileWriter) compressedSize() uint64 {
+	if w == nil {
+		return 0
+	}
+	if w.streaming {
+		if w.streamSink != nil {
+			return w.streamSink.Size()
+		}
+		return 0
+	}
+	if w.comp != nil {
+		return w.comp.Size()
+	}
+	return 0
 }
 
 func (w *fileWriter) Write(p []byte) (int, error) {
@@ -647,7 +699,7 @@ func (w *fileWriter) Write(p []byte) (int, error) {
 	if limited && err == nil && n == len(chunk) {
 		sizeExceeded = true
 	}
-	if w.plainN > maxARJFileSize || w.comp.Size() > maxARJFileSize {
+	if w.plainN > maxARJFileSize || w.compressedSize() > maxARJFileSize {
 		sizeExceeded = true
 	}
 	if sizeExceeded {
@@ -677,16 +729,18 @@ func (w *fileWriter) close() (err error) {
 			w.w.latchFailure(err)
 		}
 	}()
-	defer func() {
-		if cleanupErr := w.comp.Close(); cleanupErr != nil {
-			err = errors.Join(err, cleanupErr)
-		}
-	}()
+	if w.comp != nil {
+		defer func() {
+			if cleanupErr := w.comp.Close(); cleanupErr != nil {
+				err = errors.Join(err, cleanupErr)
+			}
+		}()
+	}
 	if err = w.cw.Close(); err != nil {
 		return err
 	}
 
-	if w.h.isDir() && (w.plainN != 0 || w.comp.Size() != 0) {
+	if w.h.isDir() && (w.plainN != 0 || w.compressedSize() != 0) {
 		return errDirectoryFileData
 	}
 	if w.writeErr != nil {
@@ -694,7 +748,7 @@ func (w *fileWriter) close() (err error) {
 	}
 
 	w.h.UncompressedSize64 = w.plainN
-	w.h.CompressedSize64 = w.comp.Size()
+	w.h.CompressedSize64 = w.compressedSize()
 	if w.h.UncompressedSize64 > maxARJFileSize || w.h.CompressedSize64 > maxARJFileSize {
 		return errFileTooLarge
 	}
@@ -702,40 +756,20 @@ func (w *fileWriter) close() (err error) {
 	w.h.modifiedDOS = timeToDosDateTime(w.h.Modified)
 	syncFileHeaderExtMetadata(w.h)
 
-	basic := make([]byte, int(w.h.FirstHeaderSize))
-	basic[0] = w.h.FirstHeaderSize
-	basic[1] = w.h.ArchiverVersion
-	basic[2] = w.h.MinVersion
-	basic[3] = w.h.HostOS
-	basic[4] = w.h.Flags
-	basic[5] = byte(w.h.Method)
-	basic[6] = w.h.fileType
-	basic[7] = w.h.PasswordModifier
-	binary.LittleEndian.PutUint32(basic[8:12], w.h.modifiedDOS)
-	binary.LittleEndian.PutUint32(basic[12:16], uint32(w.h.CompressedSize64))
-	binary.LittleEndian.PutUint32(basic[16:20], uint32(w.h.UncompressedSize64))
-	binary.LittleEndian.PutUint32(basic[20:24], w.h.CRC32)
-	binary.LittleEndian.PutUint16(basic[24:26], w.h.FilespecPos)
-	binary.LittleEndian.PutUint16(basic[26:28], w.h.fileMode)
-	basic[28] = w.h.ExtFlags
-	basic[29] = w.h.ChapterNumber
-	copy(basic[arjMinFirstHeaderSize:], w.h.firstHeaderExtra)
-
-	var full []byte
-	full = append(full, basic...)
-	full = append(full, w.h.Name...)
-	full = append(full, 0)
-	full = append(full, w.h.Comment...)
-	full = append(full, 0)
-
-	if len(full) > arjMaxBasicHeaderSize {
-		return errLongName
-	}
-	if err := writeHeaderBlockWithExt(w.w.cw, full, w.h.LocalExtendedHeaders); err != nil {
-		return err
-	}
-	if _, err := w.comp.WriteTo(w.w.cw); err != nil {
-		return err
+	if w.streaming {
+		if err := w.w.Flush(); err != nil {
+			return err
+		}
+		if err := patchLocalFileHeader(w.w.streamSeeker, w.localHeaderOffset, w.h); err != nil {
+			return err
+		}
+	} else {
+		if err := writeLocalFileHeader(w.w.cw, w.h); err != nil {
+			return err
+		}
+		if _, err := w.comp.WriteTo(w.w.cw); err != nil {
+			return err
+		}
 	}
 	w.w.last = nil
 	return nil
@@ -1148,6 +1182,66 @@ func (b *entryBuffer) Close() error {
 	return err
 }
 
+type entryStreamSink struct {
+	w     io.Writer
+	limit uint64
+	scope string
+	size  uint64
+}
+
+func newEntryStreamSink(w io.Writer, limit uint64, scope string) *entryStreamSink {
+	return &entryStreamSink{
+		w:     w,
+		limit: limit,
+		scope: scope,
+	}
+}
+
+func (w *entryStreamSink) Size() uint64 {
+	if w == nil {
+		return 0
+	}
+	return w.size
+}
+
+func (w *entryStreamSink) limitErr(attempted int) *BufferLimitError {
+	return &BufferLimitError{
+		Scope:     w.scope,
+		Limit:     w.limit,
+		Buffered:  w.size,
+		Attempted: uint64(attempted),
+	}
+}
+
+func (w *entryStreamSink) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if w.limit != 0 && w.size >= w.limit {
+		return 0, w.limitErr(len(p))
+	}
+
+	chunk := p
+	limited := false
+	if w.limit != 0 {
+		remaining := w.limit - w.size
+		if uint64(len(chunk)) > remaining {
+			chunk = chunk[:int(remaining)]
+			limited = true
+		}
+	}
+
+	n, err := w.w.Write(chunk)
+	w.size += uint64(n)
+	if err != nil {
+		return n, err
+	}
+	if limited {
+		return n, w.limitErr(len(p))
+	}
+	return n, nil
+}
+
 type countWriter struct {
 	w     io.Writer
 	count atomic.Int64
@@ -1253,4 +1347,35 @@ func writeAll(w io.Writer, p []byte) (int, error) {
 		}
 	}
 	return total, nil
+}
+
+func patchLocalFileHeader(ws io.WriteSeeker, off int64, h *FileHeader) error {
+	if ws == nil {
+		return errors.New("arj: nil seekable writer for local header patch")
+	}
+	if off < 0 {
+		return errors.New("arj: negative local header patch offset")
+	}
+
+	var buf bytes.Buffer
+	if err := writeLocalFileHeader(&buf, h); err != nil {
+		return err
+	}
+
+	cur, err := ws.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return err
+	}
+	if _, err := ws.Seek(off, io.SeekStart); err != nil {
+		return err
+	}
+
+	writeErr := error(nil)
+	if _, err := writeAll(ws, buf.Bytes()); err != nil {
+		writeErr = errors.Join(writeErr, err)
+	}
+	if _, err := ws.Seek(cur, io.SeekStart); err != nil {
+		writeErr = errors.Join(writeErr, err)
+	}
+	return writeErr
 }

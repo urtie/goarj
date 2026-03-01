@@ -46,6 +46,7 @@ const (
 	maxCompressedChunkExhaustiveThreshold = 2048
 	maxCompressedChunkProbeBudget         = 48
 	maxCompressedChunkLocalRefineWindow   = 96
+	multiVolumeCompressedStreamChunkSize  = 64 << 10
 )
 
 // MultiVolumeWriterOptions configures NewMultiVolumeWriter.
@@ -367,9 +368,30 @@ func (w *MultiVolumeWriter) CreateHeader(fh *FileHeader) (io.Writer, error) {
 	if comp == nil {
 		return nil, ErrAlgorithm
 	}
+	limits := w.writeBufferLimits()
+
+	if h.Method == Store && !h.isDir() {
+		sw := &multiVolumeStoreFileWriter{
+			w: w,
+			h: &h,
+		}
+		w.last = sw
+		return sw, nil
+	}
+
+	if !h.isDir() {
+		cw := &multiVolumeCompressedFileWriter{
+			w:                  w,
+			h:                  &h,
+			compressor:         comp,
+			method14InputLimit: maxARJFileSize,
+			chunkSize:          multiVolumeCompressedStreamChunkSize,
+		}
+		w.last = cw
+		return cw, nil
+	}
 
 	fw := &multiVolumeFileWriter{w: w, h: &h}
-	limits := w.writeBufferLimits()
 	fw.entryBufferLimit = limits.MaxPlainEntryBufferSize
 	fw.method14InputLimit = limits.MaxMethod14InputBufferSize
 	fw.compressor = comp
@@ -741,6 +763,543 @@ func (w *multiVolumeFileWriter) close() (err error) {
 		return err
 	}
 	w.w.last = nil
+	return nil
+}
+
+type multiVolumeStoreSegment struct {
+	header       FileHeader
+	headerOffset int64
+	plainN       uint64
+	crc          hash32
+}
+
+type multiVolumeCompressedSegment struct {
+	header       FileHeader
+	headerOffset int64
+	file         *os.File
+}
+
+type multiVolumeCompressedFileWriter struct {
+	w                  *MultiVolumeWriter
+	h                  *FileHeader
+	compressor         Compressor
+	method14InputLimit uint64
+	chunkSize          int
+	plainN             uint64
+	resumePos          uint64
+	continued          bool
+	lastSegment        *multiVolumeCompressedSegment
+	writeErr           error
+	closed             bool
+}
+
+func (w *multiVolumeCompressedFileWriter) latchWriteErr(err error) {
+	if err == nil || w.writeErr != nil {
+		return
+	}
+	w.writeErr = err
+}
+
+func (w *multiVolumeCompressedFileWriter) Write(p []byte) (int, error) {
+	if w.closed {
+		return 0, errors.New("arj: write to closed file")
+	}
+	if w.writeErr != nil {
+		return 0, w.writeErr
+	}
+	if w.plainN > maxARJFileSize {
+		w.latchWriteErr(errFileTooLarge)
+		return 0, w.writeErr
+	}
+
+	total := 0
+	for len(p) > 0 {
+		if w.plainN >= maxARJFileSize {
+			sizeErr := errFileTooLarge
+			w.latchWriteErr(sizeErr)
+			return total, sizeErr
+		}
+
+		chunkN := len(p)
+		if w.chunkSize > 0 && chunkN > w.chunkSize {
+			chunkN = w.chunkSize
+		}
+		remaining := maxARJFileSize - w.plainN
+		if uint64(chunkN) > remaining {
+			chunkN = int(remaining)
+		}
+		if chunkN <= 0 {
+			sizeErr := errFileTooLarge
+			w.latchWriteErr(sizeErr)
+			return total, sizeErr
+		}
+
+		consumed, err := w.writeChunk(p[:chunkN])
+		total += consumed
+		p = p[consumed:]
+		if err != nil {
+			w.latchWriteErr(err)
+			return total, err
+		}
+		if consumed < chunkN {
+			return total, io.ErrShortWrite
+		}
+	}
+
+	return total, nil
+}
+
+func (w *multiVolumeCompressedFileWriter) writeChunk(chunk []byte) (int, error) {
+	total := 0
+	for len(chunk) > 0 {
+		n, err := w.writeSegmentFromPrefix(chunk)
+		total += n
+		chunk = chunk[n:]
+		if err != nil {
+			return total, err
+		}
+		if n == 0 {
+			return total, io.ErrShortWrite
+		}
+	}
+	return total, nil
+}
+
+func (w *multiVolumeCompressedFileWriter) writeSegmentFromPrefix(plain []byte) (int, error) {
+	if len(plain) == 0 {
+		return 0, nil
+	}
+	method := w.h.Method
+
+	for {
+		if err := w.w.ensureCurrentVolume(); err != nil {
+			return 0, err
+		}
+
+		h, err := w.segmentHeaderTemplate(true)
+		if err != nil {
+			return 0, err
+		}
+		overhead, err := rawSegmentOverhead(&h)
+		if err != nil {
+			return 0, err
+		}
+
+		maxComp := w.w.currentRemaining() - int64(overhead)
+		if maxComp <= 0 {
+			if !w.w.currentHasEntries {
+				return 0, errVolumeTooSmall
+			}
+			w.lastSegment = nil
+			if err := w.w.closeCurrentVolume(true); err != nil {
+				return 0, err
+			}
+			continue
+		}
+
+		n, comp, err := w.w.maxCompressedChunkWithCompressor(method, plain, maxComp, w.compressor, w.method14InputLimit)
+		if err != nil {
+			return 0, err
+		}
+		if n == 0 {
+			if !w.w.currentHasEntries {
+				return 0, errVolumeTooSmall
+			}
+			w.lastSegment = nil
+			if err := w.w.closeCurrentVolume(true); err != nil {
+				return 0, err
+			}
+			continue
+		}
+		if n > len(plain) {
+			return 0, io.ErrUnexpectedEOF
+		}
+		if uint64(n) > maxARJFileSize-w.plainN {
+			return 0, errFileTooLarge
+		}
+
+		crc := crc32.ChecksumIEEE(plain[:n])
+		if err := w.writeSegment(h, uint64(n), comp, crc); err != nil {
+			return 0, err
+		}
+		return n, nil
+	}
+}
+
+func (w *multiVolumeCompressedFileWriter) writeSegment(base FileHeader, plainSize uint64, comp []byte, crc uint32) error {
+	if plainSize > maxARJFileSize || uint64(len(comp)) > maxARJFileSize {
+		return errFileTooLarge
+	}
+
+	h := base
+	h.UncompressedSize64 = plainSize
+	h.CompressedSize64 = uint64(len(comp))
+	h.CRC32 = crc
+	if plainSize == 0 {
+		h.CRC32 = crc32.ChecksumIEEE(nil)
+	}
+	h.modifiedDOS = timeToDosDateTime(h.Modified)
+	syncFileHeaderExtMetadata(&h)
+
+	headerOffset := w.w.current.cw.Count()
+	if err := writeLocalFileHeader(w.w.current.cw, &h); err != nil {
+		w.w.latchFailure(err)
+		return err
+	}
+	if len(comp) != 0 {
+		if _, err := writeAll(w.w.current.cw, comp); err != nil {
+			w.w.latchFailure(err)
+			return err
+		}
+	}
+	w.w.currentHasEntries = true
+	w.plainN += plainSize
+	w.resumePos += plainSize
+	w.continued = true
+	w.lastSegment = &multiVolumeCompressedSegment{
+		header:       h,
+		headerOffset: headerOffset,
+		file:         w.w.currentFile,
+	}
+	return nil
+}
+
+func (w *multiVolumeCompressedFileWriter) segmentHeaderTemplate(hasMore bool) (FileHeader, error) {
+	h := cloneFileHeader(*w.h)
+	h.Flags &^= (FlagVolume | FlagExtFile)
+	if hasMore {
+		h.Flags |= FlagVolume
+	}
+	if w.continued {
+		h.Flags |= FlagExtFile
+		if err := prepareContinuationHeader(&h, w.resumePos); err != nil {
+			return FileHeader{}, err
+		}
+	}
+	h.UncompressedSize64 = 0
+	h.CompressedSize64 = 0
+	h.CRC32 = 0
+	return h, nil
+}
+
+func (w *multiVolumeCompressedFileWriter) Close() error {
+	return w.close()
+}
+
+func (w *multiVolumeCompressedFileWriter) isClosed() bool {
+	return w.closed
+}
+
+func (w *multiVolumeCompressedFileWriter) close() (err error) {
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+
+	if w.writeErr != nil {
+		if w.plainN != 0 || w.lastSegment != nil {
+			w.w.latchFailure(w.writeErr)
+		}
+		return w.writeErr
+	}
+	if w.plainN == 0 {
+		if err := w.emitEmptySegment(); err != nil {
+			return err
+		}
+	}
+	if w.lastSegment == nil {
+		return ErrFormat
+	}
+	if w.lastSegment.file == nil {
+		return io.ErrClosedPipe
+	}
+
+	finalHeader := cloneFileHeader(w.lastSegment.header)
+	finalHeader.Flags &^= FlagVolume
+	finalHeader.modifiedDOS = timeToDosDateTime(finalHeader.Modified)
+	syncFileHeaderExtMetadata(&finalHeader)
+
+	if err := w.w.Flush(); err != nil {
+		w.w.latchFailure(err)
+		return err
+	}
+	if err := patchLocalFileHeader(w.lastSegment.file, w.lastSegment.headerOffset, &finalHeader); err != nil {
+		w.w.latchFailure(err)
+		return err
+	}
+
+	w.w.last = nil
+	return nil
+}
+
+func (w *multiVolumeCompressedFileWriter) emitEmptySegment() error {
+	for {
+		if err := w.w.ensureCurrentVolume(); err != nil {
+			return err
+		}
+		h, err := w.segmentHeaderTemplate(false)
+		if err != nil {
+			return err
+		}
+		overhead, err := rawSegmentOverhead(&h)
+		if err != nil {
+			return err
+		}
+		if int64(overhead) > w.w.currentRemaining() {
+			if !w.w.currentHasEntries {
+				return errVolumeTooSmall
+			}
+			w.lastSegment = nil
+			if err := w.w.closeCurrentVolume(true); err != nil {
+				return err
+			}
+			continue
+		}
+		return w.writeSegment(h, 0, nil, crc32.ChecksumIEEE(nil))
+	}
+}
+
+type multiVolumeStoreFileWriter struct {
+	w         *MultiVolumeWriter
+	h         *FileHeader
+	plainN    uint64
+	resumePos uint64
+	continued bool
+	segment   *multiVolumeStoreSegment
+	writeErr  error
+	closed    bool
+}
+
+func (w *multiVolumeStoreFileWriter) latchWriteErr(err error) {
+	if err == nil || w.writeErr != nil {
+		return
+	}
+	w.writeErr = err
+}
+
+func (w *multiVolumeStoreFileWriter) Write(p []byte) (int, error) {
+	if w.closed {
+		return 0, errors.New("arj: write to closed file")
+	}
+	if w.writeErr != nil {
+		return 0, w.writeErr
+	}
+	if w.plainN > maxARJFileSize {
+		w.latchWriteErr(errFileTooLarge)
+		return 0, w.writeErr
+	}
+
+	total := 0
+	for len(p) > 0 {
+		if w.segment == nil {
+			if err := w.openSegment(true); err != nil {
+				w.latchWriteErr(err)
+				return total, err
+			}
+		}
+
+		if w.plainN >= maxARJFileSize {
+			sizeErr := errFileTooLarge
+			w.latchWriteErr(sizeErr)
+			return total, sizeErr
+		}
+
+		volumeRemaining := w.w.currentRemaining()
+		if volumeRemaining <= 0 {
+			if err := w.finishSegment(true); err != nil {
+				w.latchWriteErr(err)
+				return total, err
+			}
+			if err := w.w.closeCurrentVolume(true); err != nil {
+				w.latchWriteErr(err)
+				return total, err
+			}
+			continue
+		}
+
+		chunkN := len(p)
+		fileRemaining := maxARJFileSize - w.plainN
+		if uint64(chunkN) > fileRemaining {
+			chunkN = int(fileRemaining)
+		}
+		if int64(chunkN) > volumeRemaining {
+			chunkN = int(volumeRemaining)
+		}
+		if chunkN <= 0 {
+			sizeErr := errFileTooLarge
+			w.latchWriteErr(sizeErr)
+			return total, sizeErr
+		}
+
+		n, err := w.w.current.cw.Write(p[:chunkN])
+		if n > 0 {
+			_, _ = w.segment.crc.Write(p[:n])
+			w.segment.plainN += uint64(n)
+			w.plainN += uint64(n)
+			total += n
+			p = p[n:]
+		}
+		if err != nil {
+			w.latchWriteErr(err)
+			return total, err
+		}
+		if n < chunkN {
+			w.latchWriteErr(io.ErrShortWrite)
+			return total, io.ErrShortWrite
+		}
+
+		if len(p) == 0 {
+			break
+		}
+
+		if w.w.currentRemaining() == 0 {
+			if err := w.finishSegment(true); err != nil {
+				w.latchWriteErr(err)
+				return total, err
+			}
+			if err := w.w.closeCurrentVolume(true); err != nil {
+				w.latchWriteErr(err)
+				return total, err
+			}
+		}
+	}
+
+	return total, nil
+}
+
+func (w *multiVolumeStoreFileWriter) Close() error {
+	return w.close()
+}
+
+func (w *multiVolumeStoreFileWriter) isClosed() bool {
+	return w.closed
+}
+
+func (w *multiVolumeStoreFileWriter) close() (err error) {
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+	defer func() {
+		if err != nil {
+			w.w.latchFailure(err)
+		}
+	}()
+
+	if w.writeErr != nil {
+		return w.writeErr
+	}
+
+	if w.segment == nil {
+		if err := w.openSegment(false); err != nil {
+			return err
+		}
+	}
+	if err := w.finishSegment(false); err != nil {
+		return err
+	}
+
+	w.w.last = nil
+	return nil
+}
+
+func (w *multiVolumeStoreFileWriter) openSegment(needPayload bool) error {
+	h := cloneFileHeader(*w.h)
+	h.Flags &^= (FlagVolume | FlagExtFile)
+	if w.continued {
+		h.Flags |= FlagExtFile
+		if err := prepareContinuationHeader(&h, w.resumePos); err != nil {
+			return err
+		}
+	}
+	h.UncompressedSize64 = 0
+	h.CompressedSize64 = 0
+	h.CRC32 = 0
+
+	for {
+		if err := w.w.ensureCurrentVolume(); err != nil {
+			return err
+		}
+
+		overhead, err := rawSegmentOverhead(&h)
+		if err != nil {
+			return err
+		}
+		remaining := w.w.currentRemaining()
+		if int64(overhead) > remaining {
+			if !w.w.currentHasEntries {
+				return errVolumeTooSmall
+			}
+			if err := w.w.closeCurrentVolume(true); err != nil {
+				return err
+			}
+			continue
+		}
+		if needPayload && remaining-int64(overhead) <= 0 {
+			if !w.w.currentHasEntries {
+				return errVolumeTooSmall
+			}
+			if err := w.w.closeCurrentVolume(true); err != nil {
+				return err
+			}
+			continue
+		}
+
+		headerOffset := w.w.current.cw.Count()
+		if err := writeLocalFileHeader(w.w.current.cw, &h); err != nil {
+			w.w.latchFailure(err)
+			return err
+		}
+		w.w.currentHasEntries = true
+		w.segment = &multiVolumeStoreSegment{
+			header:       h,
+			headerOffset: headerOffset,
+			crc:          crc32.NewIEEE(),
+		}
+		return nil
+	}
+}
+
+func (w *multiVolumeStoreFileWriter) finishSegment(hasMore bool) error {
+	if w.segment == nil {
+		return nil
+	}
+	if w.w.currentFile == nil {
+		return io.ErrClosedPipe
+	}
+
+	h := cloneFileHeader(w.segment.header)
+	h.UncompressedSize64 = w.segment.plainN
+	h.CompressedSize64 = w.segment.plainN
+	if h.UncompressedSize64 > maxARJFileSize || h.CompressedSize64 > maxARJFileSize {
+		return errFileTooLarge
+	}
+	h.CRC32 = w.segment.crc.Sum32()
+	if w.segment.plainN == 0 {
+		h.CRC32 = crc32.ChecksumIEEE(nil)
+	}
+	if hasMore {
+		h.Flags |= FlagVolume
+	} else {
+		h.Flags &^= FlagVolume
+	}
+	h.modifiedDOS = timeToDosDateTime(h.Modified)
+	syncFileHeaderExtMetadata(&h)
+
+	if err := w.w.Flush(); err != nil {
+		w.w.latchFailure(err)
+		return err
+	}
+	if err := patchLocalFileHeader(w.w.currentFile, w.segment.headerOffset, &h); err != nil {
+		w.w.latchFailure(err)
+		return err
+	}
+
+	w.resumePos += w.segment.plainN
+	if hasMore {
+		w.continued = true
+	}
+	w.segment = nil
 	return nil
 }
 
@@ -1206,6 +1765,38 @@ func (w *MultiVolumeWriter) maxCompressedChunk(method uint16, plain []byte, maxC
 		maxComp,
 		comp,
 		limits.MaxMethod14InputBufferSize,
+	)
+}
+
+func (w *MultiVolumeWriter) maxCompressedChunkWithCompressor(
+	method uint16,
+	plain []byte,
+	maxComp int64,
+	comp Compressor,
+	method14InputLimit uint64,
+) (int, []byte, error) {
+	if len(plain) == 0 {
+		return 0, nil, nil
+	}
+	if method != Store && comp == nil {
+		return 0, nil, ErrAlgorithm
+	}
+
+	buf := newEntryBuffer(uint64(len(plain)), bufferScopeMultiEntryPlain)
+	if _, err := buf.Write(plain); err != nil {
+		_ = buf.Close()
+		return 0, nil, err
+	}
+	defer func() { _ = buf.Close() }()
+
+	return w.maxCompressedChunkBufferedWithCompressor(
+		method,
+		buf,
+		0,
+		len(plain),
+		maxComp,
+		comp,
+		method14InputLimit,
 	)
 }
 
