@@ -1,0 +1,18 @@
+# Go build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Build output directories
+bin/
+build/
+dist/
+
+# Coverage and profiling artifacts
+coverage.out
+*.coverprofile
+*.prof
+*.pprof
