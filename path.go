@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -25,6 +26,9 @@ func SafeExtractPath(dir, name string) (string, error) {
 func safeExtractRelativePath(name string) (string, error) {
 	cleanName := strings.TrimSuffix(name, "/")
 	if cleanName == "" || cleanName == "." || strings.ContainsRune(cleanName, '\\') {
+		return "", insecureExtractPathError(name)
+	}
+	if runtime.GOOS == "windows" && strings.ContainsRune(cleanName, ':') {
 		return "", insecureExtractPathError(name)
 	}
 	if !fs.ValidPath(cleanName) {
