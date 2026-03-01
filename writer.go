@@ -1244,12 +1244,12 @@ func (w *entryStreamSink) Write(p []byte) (int, error) {
 
 type countWriter struct {
 	w     io.Writer
-	count atomic.Int64
+	count int64
 }
 
 func (w *countWriter) Write(p []byte) (int, error) {
 	n, err := w.w.Write(p)
-	w.count.Add(int64(n))
+	w.count += int64(n)
 	return n, err
 }
 
@@ -1257,7 +1257,7 @@ func (w *countWriter) Count() int64 {
 	if w == nil {
 		return 0
 	}
-	return w.count.Load()
+	return w.count
 }
 
 func cloneCompressorOverrides(src map[uint16]Compressor) map[uint16]Compressor {

@@ -66,7 +66,7 @@ type arjBitWriter struct {
 	bitBuf   uint32
 	bitCount uint8
 	err      error
-	writeBuf [256]byte
+	writeBuf [1024]byte
 	writeN   int
 }
 
