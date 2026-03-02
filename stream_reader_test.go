@@ -350,6 +350,39 @@ func TestStreamReaderCustomDecompressorReturningNilYieldsErrAlgorithm(t *testing
 	}
 }
 
+func TestStreamReaderOpenErrorIsStickyAcrossReads(t *testing.T) {
+	payload := []byte("unsupported")
+	hdr := &FileHeader{
+		Name:               "unsupported.bin",
+		Method:             250, // deliberately unregistered decompressor
+		CRC32:              crc32.ChecksumIEEE(payload),
+		CompressedSize64:   uint64(len(payload)),
+		UncompressedSize64: uint64(len(payload)),
+	}
+	archive := buildSingleRawArchive(t, hdr, payload)
+
+	sr, err := NewStreamReader(bytes.NewReader(archive))
+	if err != nil {
+		t.Fatalf("NewStreamReader: %v", err)
+	}
+	_, rc, err := sr.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if rc == nil {
+		t.Fatal("Next reader = nil, want non-nil")
+	}
+	defer rc.Close()
+
+	buf := make([]byte, 1)
+	if n, err := rc.Read(buf); n != 0 || !errors.Is(err, ErrAlgorithm) {
+		t.Fatalf("first Read = (%d, %v), want (0, %v)", n, err, ErrAlgorithm)
+	}
+	if n, err := rc.Read(buf); n != 0 || !errors.Is(err, ErrAlgorithm) {
+		t.Fatalf("second Read = (%d, %v), want (0, %v)", n, err, ErrAlgorithm)
+	}
+}
+
 func TestNewStreamReaderRejectsTruncatedTailSignatureCandidate(t *testing.T) {
 	stream := []byte{0x11, 0x22, arjHeaderID1, arjHeaderID2}
 	_, err := NewStreamReader(bytes.NewReader(stream))

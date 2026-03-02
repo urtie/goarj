@@ -323,14 +323,18 @@ type streamEntryReadCloser struct {
 	raw    *io.LimitedReader
 	limits Method14DecodeLimits
 
-	rc     io.ReadCloser
-	opened bool
-	closed bool
+	openErr error
+	rc      io.ReadCloser
+	opened  bool
+	closed  bool
 }
 
 func (r *streamEntryReadCloser) Read(p []byte) (int, error) {
 	if r.closed {
 		return 0, io.EOF
+	}
+	if r.openErr != nil {
+		return 0, r.openErr
 	}
 	if !r.opened {
 		if err := r.open(); err != nil {
@@ -345,19 +349,23 @@ func (r *streamEntryReadCloser) Read(p []byte) (int, error) {
 
 func (r *streamEntryReadCloser) open() error {
 	if r.opened {
-		return nil
+		return r.openErr
 	}
 	r.opened = true
+	fail := func(err error) error {
+		r.openErr = err
+		return err
+	}
 
 	password := r.owner.passwordBytes()
 	defer clearBytes(password)
 
 	if err := unsupportedStreamOpenModeError(r.owner, r.header, password); err != nil {
-		return err
+		return fail(err)
 	}
 	if isNativeMethod14(r.header.Method) {
 		if err := validateMethod14DecodeSizes(r.limits, r.header.CompressedSize64, r.header.UncompressedSize64); err != nil {
-			return err
+			return fail(err)
 		}
 	}
 
@@ -368,7 +376,7 @@ func (r *streamEntryReadCloser) open() error {
 
 	dcomp := r.owner.decompressor(r.header.Method)
 	if dcomp == nil {
-		return ErrAlgorithm
+		return fail(ErrAlgorithm)
 	}
 
 	in := io.Reader(r.raw)
@@ -385,7 +393,7 @@ func (r *streamEntryReadCloser) open() error {
 		if garbled != nil {
 			garbled.clearSensitiveData()
 		}
-		return ErrAlgorithm
+		return fail(ErrAlgorithm)
 	}
 	if garbled != nil {
 		rc = &garbledReaderCloser{
@@ -398,6 +406,7 @@ func (r *streamEntryReadCloser) open() error {
 		wantCRC: r.header.CRC32,
 		wantN:   r.header.UncompressedSize64,
 	}
+	r.openErr = nil
 	return nil
 }
 
