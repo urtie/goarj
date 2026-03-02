@@ -431,6 +431,128 @@ func TestStreamReaderWithOptionsMaxExtendedHeaderBytes(t *testing.T) {
 	}
 }
 
+func TestStreamReaderNextRejectsMalformedSecondHeaderSignature(t *testing.T) {
+	archive := buildStreamArchive(t, []streamTestEntry{
+		{
+			header:  FileHeader{Name: "first.txt", Method: Store},
+			payload: []byte("first payload"),
+		},
+		{
+			header:  FileHeader{Name: "second.txt", Method: Store},
+			payload: []byte("second payload"),
+		},
+	})
+	corrupt := append([]byte(nil), archive...)
+	secondOff := secondLocalHeaderOffset(t, corrupt)
+	if secondOff+2 > len(corrupt) {
+		t.Fatalf("second header prefix out of range at %d", secondOff)
+	}
+	corrupt[secondOff] ^= 0xff
+
+	sr, err := NewStreamReader(bytes.NewReader(corrupt))
+	if err != nil {
+		t.Fatalf("NewStreamReader: %v", err)
+	}
+
+	h, rc, err := sr.Next()
+	if err != nil {
+		t.Fatalf("Next(first): %v", err)
+	}
+	if got, want := h.Name, "first.txt"; got != want {
+		t.Fatalf("first name = %q, want %q", got, want)
+	}
+	gotFirst, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll(first): %v", err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatalf("Close(first): %v", err)
+	}
+	if got, want := string(gotFirst), "first payload"; got != want {
+		t.Fatalf("first payload = %q, want %q", got, want)
+	}
+
+	if _, _, err := sr.Next(); !errors.Is(err, ErrFormat) {
+		t.Fatalf("Next(second) error = %v, want %v", err, ErrFormat)
+	}
+}
+
+func TestStreamReaderNextRejectsMalformedSecondHeaderCRC(t *testing.T) {
+	archive := buildStreamArchive(t, []streamTestEntry{
+		{
+			header:  FileHeader{Name: "first.txt", Method: Store},
+			payload: []byte("first payload"),
+		},
+		{
+			header:  FileHeader{Name: "second.txt", Method: Store},
+			payload: []byte("second payload"),
+		},
+	})
+	corrupt := append([]byte(nil), archive...)
+	secondOff := secondLocalHeaderOffset(t, corrupt)
+	if secondOff+4 > len(corrupt) {
+		t.Fatalf("second header prefix out of range at %d", secondOff)
+	}
+	basicSize := int(binary.LittleEndian.Uint16(corrupt[secondOff+2 : secondOff+4]))
+	crcOff := secondOff + 4 + basicSize
+	if basicSize < arjMinFirstHeaderSize || crcOff+4 > len(corrupt) {
+		t.Fatalf("second header basic/CRC out of range")
+	}
+	corrupt[crcOff] ^= 0xff
+
+	sr, err := NewStreamReader(bytes.NewReader(corrupt))
+	if err != nil {
+		t.Fatalf("NewStreamReader: %v", err)
+	}
+
+	h, rc, err := sr.Next()
+	if err != nil {
+		t.Fatalf("Next(first): %v", err)
+	}
+	if got, want := h.Name, "first.txt"; got != want {
+		t.Fatalf("first name = %q, want %q", got, want)
+	}
+	gotFirst, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll(first): %v", err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatalf("Close(first): %v", err)
+	}
+	if got, want := string(gotFirst), "first payload"; got != want {
+		t.Fatalf("first payload = %q, want %q", got, want)
+	}
+
+	if _, _, err := sr.Next(); !errors.Is(err, ErrFormat) {
+		t.Fatalf("Next(second) error = %v, want %v", err, ErrFormat)
+	}
+}
+
+func secondLocalHeaderOffset(t *testing.T, archive []byte) int {
+	t.Helper()
+
+	size := int64(len(archive))
+	r := bytes.NewReader(archive)
+	_, _, firstOff, err := readHeaderBlock(r, size, 0)
+	if err != nil {
+		t.Fatalf("readHeaderBlock(main): %v", err)
+	}
+	firstBasic, firstExt, firstDataOff, err := readHeaderBlock(r, size, firstOff)
+	if err != nil {
+		t.Fatalf("readHeaderBlock(first local): %v", err)
+	}
+	firstFile, err := parseLocalFileHeaderOwned(firstBasic, firstExt, nil)
+	if err != nil {
+		t.Fatalf("parseLocalFileHeaderOwned(first local): %v", err)
+	}
+
+	secondOff := firstDataOff + int64(firstFile.CompressedSize64)
+	if secondOff > size {
+		t.Fatalf("second header offset = %d, archive size = %d", secondOff, size)
+	}
+	return int(secondOff)
+}
+
 func TestExtractAllStream(t *testing.T) {
 	archive := buildStreamArchive(t, []streamTestEntry{
 		{
