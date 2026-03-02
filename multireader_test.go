@@ -116,6 +116,36 @@ func TestVolumePathsContinuationThreeDigitWidth(t *testing.T) {
 	}
 }
 
+func TestVolumePathsRequiresRequestedContinuationPathToExist(t *testing.T) {
+	tmp := t.TempDir()
+	base := filepath.Join(tmp, "set")
+
+	mustWriteFile(t, base+".arj", []byte("x"))
+	mustWriteFile(t, base+".a01", []byte("x"))
+
+	_, err := VolumePaths(base + ".a99")
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("VolumePaths(.a99) error = %v, want %v", err, os.ErrNotExist)
+	}
+}
+
+func TestVolumePathsContinuationPathCaseInsensitiveExistence(t *testing.T) {
+	tmp := t.TempDir()
+	base := filepath.Join(tmp, "set")
+
+	mustWriteFile(t, base+".arj", []byte("x"))
+	mustWriteFile(t, base+".A01", []byte("x"))
+
+	got, err := VolumePaths(base + ".a01")
+	if err != nil {
+		t.Fatalf("VolumePaths(.a01): %v", err)
+	}
+	want := []string{base + ".arj", base + ".A01"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("VolumePaths(.a01) = %v, want %v", got, want)
+	}
+}
+
 func TestIsVolumePartExt(t *testing.T) {
 	tests := []struct {
 		ext  string

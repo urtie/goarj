@@ -177,15 +177,35 @@ func volumePaths(name string, maxVolumes int) ([]string, error) {
 		return collectVolumePaths(stem, name, maxVolumes, 0)
 	case isVolumePartExt(ext):
 		stem := strings.TrimSuffix(name, ext)
+		part, width, _ := parseVolumePartExt(ext)
+		if _, err := resolveContinuationInputPath(name, stem, part, width); err != nil {
+			return nil, err
+		}
 		first, err := resolveFirstVolumePath(stem)
 		if err != nil {
 			return nil, err
 		}
-		_, width, _ := parseVolumePartExt(ext)
 		return collectVolumePaths(stem, first, maxVolumes, width)
 	default:
 		return []string{name}, nil
 	}
+}
+
+func resolveContinuationInputPath(name, stem string, part, width int) (string, error) {
+	if ok, err := pathExists(name); err != nil {
+		return "", err
+	} else if ok {
+		return name, nil
+	}
+
+	path, _, found, err := resolvePartVolumePath(stem, part, width)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", &os.PathError{Op: "open", Path: name, Err: os.ErrNotExist}
+	}
+	return path, nil
 }
 
 func collectVolumePaths(stem, first string, maxVolumes, preferredWidth int) ([]string, error) {
