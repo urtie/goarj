@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      GOARJ_REQUIRE_INTEROP: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install reference ARJ implementation
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends arj
+          command -v arj
+
+      - name: Run tests
+        run: go test ./...
