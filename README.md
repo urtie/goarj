@@ -1,6 +1,7 @@
 # goarj
 
 [![PkgGoDev](https://pkg.go.dev/badge/github.com/urtie/goarj)](https://pkg.go.dev/github.com/urtie/goarj)
+[![CI](https://github.com/urtie/goarj/actions/workflows/ci.yml/badge.svg)](https://github.com/urtie/goarj/actions/workflows/ci.yml)
 
 `goarj` is a pure Go package for reading and writing ARJ archives, with no cgo dependency.
 
