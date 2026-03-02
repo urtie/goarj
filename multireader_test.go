@@ -760,6 +760,62 @@ func TestOpenMultiReaderRejectsUnrelatedBasenameVolumes(t *testing.T) {
 	}
 }
 
+func TestOpenMultiReaderAcceptsMultiPartSetWithoutSplitFileFlags(t *testing.T) {
+	tmp := t.TempDir()
+	archivePath := filepath.Join(tmp, "nosplit.arj")
+
+	mw, err := NewMultiVolumeWriter(archivePath, MultiVolumeWriterOptions{VolumeSize: 180})
+	if err != nil {
+		t.Fatalf("NewMultiVolumeWriter: %v", err)
+	}
+
+	first, err := mw.CreateHeader(&FileHeader{Name: "first.bin", Method: Store})
+	if err != nil {
+		t.Fatalf("CreateHeader(first): %v", err)
+	}
+	if _, err := first.Write(bytes.Repeat([]byte("A"), 60)); err != nil {
+		t.Fatalf("Write(first): %v", err)
+	}
+	if err := first.(io.Closer).Close(); err != nil {
+		t.Fatalf("Close(first): %v", err)
+	}
+
+	second, err := mw.CreateHeader(&FileHeader{Name: "second.bin", Method: Store})
+	if err != nil {
+		t.Fatalf("CreateHeader(second): %v", err)
+	}
+	if _, err := second.Write(bytes.Repeat([]byte("B"), 10)); err != nil {
+		t.Fatalf("Write(second): %v", err)
+	}
+	if err := second.(io.Closer).Close(); err != nil {
+		t.Fatalf("Close(second): %v", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("Close multi writer: %v", err)
+	}
+
+	parts := mw.Parts()
+	if got, want := len(parts), 2; got != want {
+		t.Fatalf("parts len = %d, want %d", got, want)
+	}
+
+	r, err := OpenMultiReader(archivePath)
+	if err != nil {
+		t.Fatalf("OpenMultiReader: %v", err)
+	}
+	defer r.Close()
+
+	if got, want := len(r.File), 2; got != want {
+		t.Fatalf("file count = %d, want %d", got, want)
+	}
+	if got := mustReadFileEntry(t, r.File[0]); !bytes.Equal(got, bytes.Repeat([]byte("A"), 60)) {
+		t.Fatalf("first payload mismatch")
+	}
+	if got := mustReadFileEntry(t, r.File[1]); !bytes.Equal(got, bytes.Repeat([]byte("B"), 10)) {
+		t.Fatalf("second payload mismatch")
+	}
+}
+
 func TestOpenMultiReaderMissingContinuation(t *testing.T) {
 	tmp := t.TempDir()
 	archivePath := filepath.Join(tmp, "broken.arj")

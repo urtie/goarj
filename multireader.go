@@ -492,6 +492,7 @@ func validateVolumeMainHeaderCoherence(volumes []*Reader) error {
 	baseComment := volumes[0].Comment
 	baseMainExt := base.MainExtendedHeaders
 	baseFirstHeaderExtra := base.FirstHeaderExtra
+	sawVolumeFlagSet := base.Flags&FlagVolume != 0
 	sawVolumeFlagClear := base.Flags&FlagVolume == 0
 
 	for i := 1; i < len(volumes); i++ {
@@ -512,9 +513,12 @@ func validateVolumeMainHeaderCoherence(volumes []*Reader) error {
 		if sawVolumeFlagClear && hasVolumeFlag {
 			return inconsistentVolumeMainHeaderError("Flags", i)
 		}
-		if !hasVolumeFlag {
-			sawVolumeFlagClear = true
-		}
+			if !hasVolumeFlag {
+				sawVolumeFlagClear = true
+			}
+			if hasVolumeFlag {
+				sawVolumeFlagSet = true
+			}
 
 		switch {
 		case h.FirstHeaderSize != base.FirstHeaderSize:
@@ -549,7 +553,10 @@ func validateVolumeMainHeaderCoherence(volumes []*Reader) error {
 			return inconsistentVolumeMainHeaderError("ProtectionFlags", i)
 		case h.ProtectionReserved != base.ProtectionReserved:
 			return inconsistentVolumeMainHeaderError("ProtectionReserved", i)
+			}
 		}
+	if len(volumes) > 1 && !sawVolumeFlagSet {
+		return ErrFormat
 	}
 	return nil
 }
@@ -594,7 +601,6 @@ func mergeVolumeReaders(merged *Reader, volumes []*Reader, starts []int64, r io.
 	merged.baseOffset = starts[0] + volumes[0].baseOffset
 
 	pending := make(map[string][]*File)
-	sawSplitTopology := len(volumes) == 1
 	for volumeIdx, volume := range volumes {
 		base := starts[volumeIdx]
 		for _, sf := range volume.File {
@@ -608,10 +614,6 @@ func mergeVolumeReaders(merged *Reader, volumes []*Reader, starts []int64, r io.
 				uncompressedSize: sf.UncompressedSize64,
 				crc32:            sf.CRC32,
 			}
-			if segment.flags&(FlagVolume|FlagExtFile) != 0 {
-				sawSplitTopology = true
-			}
-
 			if sf.Flags&FlagExtFile == 0 {
 				if len(merged.File) >= maxEntries {
 					return parserEntryLimitError(maxEntries)
@@ -665,9 +667,6 @@ func mergeVolumeReaders(merged *Reader, volumes []*Reader, starts []int64, r io.
 		if len(queue) != 0 {
 			return ErrFormat
 		}
-	}
-	if len(volumes) > 1 && !sawSplitTopology {
-		return ErrFormat
 	}
 
 	return nil
