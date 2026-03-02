@@ -441,6 +441,83 @@ func TestOpenMultiReaderWithOptionsMaxVolumes(t *testing.T) {
 	}
 }
 
+func TestOpenMultiReaderDetectsCorruptContinuationSegmentCRC(t *testing.T) {
+	tmp := t.TempDir()
+	base := filepath.Join(tmp, "corrupt-continuation")
+	part1 := bytes.Repeat([]byte("left-"), 64)
+	part2 := bytes.Repeat([]byte("right-"), 64)
+
+	writeVolumeArchive(t, base+".arj", []volumeEntry{
+		{name: "joined.bin", flags: FlagVolume, payload: part1},
+	})
+	writeVolumeArchive(t, base+".a01", []volumeEntry{
+		{name: "joined.bin", flags: FlagExtFile, payload: part2},
+	})
+	corruptFirstLocalPayloadByte(t, base+".a01")
+
+	multi, err := OpenMultiReader(base + ".arj")
+	if err != nil {
+		t.Fatalf("OpenMultiReader: %v", err)
+	}
+	defer multi.Close()
+
+	if got, want := len(multi.File), 1; got != want {
+		t.Fatalf("file count = %d, want %d", got, want)
+	}
+
+	rc, err := multi.File[0].Open()
+	if err != nil {
+		t.Fatalf("Open(joined.bin): %v", err)
+	}
+	got, readErr := io.ReadAll(rc)
+	_ = rc.Close()
+	if !errors.Is(readErr, ErrChecksum) {
+		t.Fatalf("ReadAll error = %v, want %v", readErr, ErrChecksum)
+	}
+	if len(got) == 0 {
+		t.Fatal("ReadAll returned no payload bytes before checksum failure")
+	}
+}
+
+func TestOpenMultiReaderDetectsTruncatedContinuationSegmentData(t *testing.T) {
+	tmp := t.TempDir()
+	base := filepath.Join(tmp, "truncated-continuation")
+	part1 := bytes.Repeat([]byte("left-"), 64)
+	part2 := bytes.Repeat([]byte("right-"), 128)
+
+	writeVolumeArchive(t, base+".arj", []volumeEntry{
+		{name: "joined.bin", flags: FlagVolume, payload: part1},
+	})
+	writeVolumeArchive(t, base+".a01", []volumeEntry{
+		{name: "joined.bin", flags: FlagExtFile, payload: part2},
+	})
+	dataOff, segSize := firstLocalPayloadRange(t, base+".a01")
+	if segSize < 8 {
+		t.Fatalf("segment size = %d, want >= 8", segSize)
+	}
+
+	multi, err := OpenMultiReader(base + ".arj")
+	if err != nil {
+		t.Fatalf("OpenMultiReader: %v", err)
+	}
+	defer multi.Close()
+
+	truncatedSize := dataOff + segSize - 7
+	if err := os.Truncate(base+".a01", truncatedSize); err != nil {
+		t.Skipf("Truncate continuation volume not supported in this environment: %v", err)
+	}
+
+	rc, err := multi.File[0].Open()
+	if err != nil {
+		t.Fatalf("Open(joined.bin): %v", err)
+	}
+	_, readErr := io.ReadAll(rc)
+	_ = rc.Close()
+	if !errors.Is(readErr, ErrFormat) {
+		t.Fatalf("ReadAll error = %v, want %v", readErr, ErrFormat)
+	}
+}
+
 func TestOpenMultiReaderWithOptionsPassesReaderParserLimits(t *testing.T) {
 	tmp := t.TempDir()
 	archivePath := filepath.Join(tmp, "limits.arj")
@@ -845,6 +922,66 @@ func mutateMainHeaderHostData(t *testing.T, path string, hostData uint16) {
 	binary.LittleEndian.PutUint16(data[basicStart+28:basicStart+30], hostData)
 	binary.LittleEndian.PutUint32(data[basicEnd:basicEnd+4], crc32.ChecksumIEEE(data[basicStart:basicEnd]))
 
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("WriteFile(%s): %v", path, err)
+	}
+}
+
+func firstLocalPayloadRange(t *testing.T, path string) (dataOff int64, segmentSize int64) {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	size := int64(len(data))
+	r := bytes.NewReader(data)
+	_, _, localOff, err := readHeaderBlock(r, size, 0)
+	if err != nil {
+		t.Fatalf("readHeaderBlock(main): %v", err)
+	}
+	basic, ext, payloadOff, err := readHeaderBlock(r, size, localOff)
+	if err != nil {
+		t.Fatalf("readHeaderBlock(local): %v", err)
+	}
+	f, err := parseLocalFileHeaderOwned(basic, ext, nil)
+	if err != nil {
+		t.Fatalf("parseLocalFileHeaderOwned(local): %v", err)
+	}
+	if f.CompressedSize64 > uint64(^uint64(0)>>1) {
+		t.Fatalf("compressed size too large: %d", f.CompressedSize64)
+	}
+	return payloadOff, int64(f.CompressedSize64)
+}
+
+func corruptFirstLocalPayloadByte(t *testing.T, path string) {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	size := int64(len(data))
+	r := bytes.NewReader(data)
+	_, _, localOff, err := readHeaderBlock(r, size, 0)
+	if err != nil {
+		t.Fatalf("readHeaderBlock(main): %v", err)
+	}
+	basic, ext, payloadOff, err := readHeaderBlock(r, size, localOff)
+	if err != nil {
+		t.Fatalf("readHeaderBlock(local): %v", err)
+	}
+	f, err := parseLocalFileHeaderOwned(basic, ext, nil)
+	if err != nil {
+		t.Fatalf("parseLocalFileHeaderOwned(local): %v", err)
+	}
+	if f.CompressedSize64 == 0 {
+		t.Fatal("continuation payload is empty; need non-empty data for corruption test")
+	}
+	if payloadOff < 0 || payloadOff >= int64(len(data)) {
+		t.Fatalf("payload offset out of range: %d", payloadOff)
+	}
+	data[payloadOff] ^= 0xff
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatalf("WriteFile(%s): %v", path, err)
 	}
