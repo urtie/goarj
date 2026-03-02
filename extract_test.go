@@ -462,6 +462,129 @@ func TestReaderExtractAllWithOptionsMaxTotalBytes(t *testing.T) {
 	}
 }
 
+func TestReaderExtractAllRejectsFileThenNestedPathCollision(t *testing.T) {
+	tmp := t.TempDir()
+	archivePath := filepath.Join(tmp, "file-then-nested.arj")
+	writeExtractArchive(t, archivePath, []extractEntry{
+		{
+			header:  buildExtractHeader("a", 0o600, time.Date(2024, time.October, 1, 1, 2, 3, 0, time.UTC)),
+			payload: []byte("plain file"),
+		},
+		{
+			header:  buildExtractHeader("a/b.txt", 0o600, time.Date(2024, time.October, 1, 1, 2, 4, 0, time.UTC)),
+			payload: []byte("should fail"),
+		},
+	})
+
+	r, err := OpenReader(archivePath)
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer r.Close()
+
+	out := filepath.Join(tmp, "out")
+	err = r.ExtractAll(out)
+	if err == nil {
+		t.Fatal("ExtractAll error = nil, want path collision error")
+	}
+
+	gotA, readErr := os.ReadFile(filepath.Join(out, "a"))
+	if readErr != nil {
+		t.Fatalf("ReadFile(a): %v", readErr)
+	}
+	if got, want := string(gotA), "plain file"; got != want {
+		t.Fatalf("a payload = %q, want %q", got, want)
+	}
+	if _, statErr := os.Stat(filepath.Join(out, "a", "b.txt")); statErr == nil {
+		t.Fatal("nested output unexpectedly exists")
+	}
+}
+
+func TestReaderExtractAllRejectsNestedPathThenFileCollision(t *testing.T) {
+	tmp := t.TempDir()
+	archivePath := filepath.Join(tmp, "nested-then-file.arj")
+	writeExtractArchive(t, archivePath, []extractEntry{
+		{
+			header:  buildExtractHeader("a/b.txt", 0o600, time.Date(2024, time.October, 2, 1, 2, 3, 0, time.UTC)),
+			payload: []byte("nested"),
+		},
+		{
+			header:  buildExtractHeader("a", 0o600, time.Date(2024, time.October, 2, 1, 2, 4, 0, time.UTC)),
+			payload: []byte("should fail"),
+		},
+	})
+
+	r, err := OpenReader(archivePath)
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer r.Close()
+
+	out := filepath.Join(tmp, "out")
+	err = r.ExtractAll(out)
+	if err == nil {
+		t.Fatal("ExtractAll error = nil, want path collision error")
+	}
+
+	gotNested, readErr := os.ReadFile(filepath.Join(out, "a", "b.txt"))
+	if readErr != nil {
+		t.Fatalf("ReadFile(a/b.txt): %v", readErr)
+	}
+	if got, want := string(gotNested), "nested"; got != want {
+		t.Fatalf("a/b.txt payload = %q, want %q", got, want)
+	}
+	info, statErr := os.Stat(filepath.Join(out, "a"))
+	if statErr != nil {
+		t.Fatalf("Stat(a): %v", statErr)
+	}
+	if !info.IsDir() {
+		t.Fatalf("a mode = %v, want directory", info.Mode())
+	}
+}
+
+func TestReaderExtractAllRejectsPreexistingFileParentCollision(t *testing.T) {
+	tmp := t.TempDir()
+	archivePath := filepath.Join(tmp, "preexisting-parent-file.arj")
+	writeExtractArchive(t, archivePath, []extractEntry{
+		{
+			header:  buildExtractHeader("a/b.txt", 0o600, time.Date(2024, time.October, 3, 1, 2, 3, 0, time.UTC)),
+			payload: []byte("should fail"),
+		},
+	})
+
+	r, err := OpenReader(archivePath)
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer r.Close()
+
+	out := filepath.Join(tmp, "out")
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatalf("MkdirAll(out): %v", err)
+	}
+	parentPath := filepath.Join(out, "a")
+	const original = "preexisting"
+	if err := os.WriteFile(parentPath, []byte(original), 0o600); err != nil {
+		t.Fatalf("WriteFile(preexisting parent): %v", err)
+	}
+
+	err = r.ExtractAll(out)
+	if err == nil {
+		t.Fatal("ExtractAll error = nil, want parent collision error")
+	}
+
+	gotParent, readErr := os.ReadFile(parentPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(preexisting parent): %v", readErr)
+	}
+	if got, want := string(gotParent), original; got != want {
+		t.Fatalf("preexisting parent payload = %q, want %q", got, want)
+	}
+	if _, statErr := os.Stat(filepath.Join(out, "a", "b.txt")); statErr == nil {
+		t.Fatal("nested output unexpectedly exists")
+	}
+}
+
 func TestApplyExtractMetadataRejectsSymlinkPath(t *testing.T) {
 	tmp := t.TempDir()
 	target := filepath.Join(tmp, "target.txt")
