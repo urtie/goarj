@@ -792,6 +792,23 @@ func TestMultiVolumeWriterCompressedStreamingVolumeTooSmall(t *testing.T) {
 	if _, err := iw.Write([]byte("x")); !errors.Is(err, errVolumeTooSmall) {
 		t.Fatalf("Write error = %v, want %v", err, errVolumeTooSmall)
 	}
+	if got := len(mw.Parts()); got != 0 {
+		t.Fatalf("Parts len = %d, want 0 after volume-too-small failure", got)
+	}
+	if _, statErr := os.Stat(archivePath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("primary archive part exists or stat failed: %v", statErr)
+	}
+
+	closeErr := mw.Close()
+	if !errors.Is(closeErr, errVolumeTooSmall) {
+		t.Fatalf("Close error = %v, want %v", closeErr, errVolumeTooSmall)
+	}
+	if got := len(mw.Parts()); got != 0 {
+		t.Fatalf("Parts len after Close = %d, want 0", got)
+	}
+	if _, statErr := os.Stat(archivePath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("primary archive part exists after Close or stat failed: %v", statErr)
+	}
 }
 
 func TestMultiVolumeWriterCompressedStreamingIgnoresMethod14InputLimit(t *testing.T) {

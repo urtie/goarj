@@ -893,7 +893,7 @@ func (w *multiVolumeCompressedFileWriter) writeSegmentFromPrefix(plain []byte) (
 		maxComp := w.w.currentRemaining() - int64(overhead)
 		if maxComp <= 0 {
 			if !w.w.currentHasEntries {
-				return 0, errVolumeTooSmall
+				return 0, w.w.volumeTooSmallOnEmptyCurrent()
 			}
 			w.lastSegment = nil
 			if err := w.w.closeCurrentVolume(true); err != nil {
@@ -908,7 +908,7 @@ func (w *multiVolumeCompressedFileWriter) writeSegmentFromPrefix(plain []byte) (
 		}
 		if n == 0 {
 			if !w.w.currentHasEntries {
-				return 0, errVolumeTooSmall
+				return 0, w.w.volumeTooSmallOnEmptyCurrent()
 			}
 			w.lastSegment = nil
 			if err := w.w.closeCurrentVolume(true); err != nil {
@@ -1052,7 +1052,7 @@ func (w *multiVolumeCompressedFileWriter) emitEmptySegment() error {
 		}
 		if int64(overhead) > w.w.currentRemaining() {
 			if !w.w.currentHasEntries {
-				return errVolumeTooSmall
+				return w.w.volumeTooSmallOnEmptyCurrent()
 			}
 			w.lastSegment = nil
 			if err := w.w.closeCurrentVolume(true); err != nil {
@@ -1233,7 +1233,7 @@ func (w *multiVolumeStoreFileWriter) openSegment(needPayload bool) error {
 		remaining := w.w.currentRemaining()
 		if int64(overhead) > remaining {
 			if !w.w.currentHasEntries {
-				return errVolumeTooSmall
+				return w.w.volumeTooSmallOnEmptyCurrent()
 			}
 			if err := w.w.closeCurrentVolume(true); err != nil {
 				return err
@@ -1242,7 +1242,7 @@ func (w *multiVolumeStoreFileWriter) openSegment(needPayload bool) error {
 		}
 		if needPayload && remaining-int64(overhead) <= 0 {
 			if !w.w.currentHasEntries {
-				return errVolumeTooSmall
+				return w.w.volumeTooSmallOnEmptyCurrent()
 			}
 			if err := w.w.closeCurrentVolume(true); err != nil {
 				return err
@@ -1505,7 +1505,7 @@ func (w *MultiVolumeWriter) writeEntry(entry *multiVolumeFileWriter) error {
 		chunkN, chunkComp, chunkCRC, chunkCRCKnown, err := w.selectSegmentData(entry, offset, continued, remainingCap)
 		if errors.Is(err, errNoSegmentFit) {
 			if !w.currentHasEntries {
-				return errVolumeTooSmall
+				return w.volumeTooSmallOnEmptyCurrent()
 			}
 			if err := w.closeCurrentVolume(true); err != nil {
 				return err
@@ -1568,7 +1568,7 @@ func (w *MultiVolumeWriter) writeEntry(entry *multiVolumeFileWriter) error {
 		}
 		if int64(overhead)+payloadSize > w.currentRemaining() {
 			if !w.currentHasEntries {
-				return errVolumeTooSmall
+				return w.volumeTooSmallOnEmptyCurrent()
 			}
 			if err := w.closeCurrentVolume(true); err != nil {
 				return err
@@ -2477,6 +2477,41 @@ func (w *MultiVolumeWriter) closeCurrentVolume(nonLast bool) error {
 	w.currentFile = nil
 	w.currentHasEntries = false
 	return err
+}
+
+func (w *MultiVolumeWriter) cleanupEmptyCurrentVolume() error {
+	if w.current == nil || w.currentHasEntries {
+		return nil
+	}
+
+	path := ""
+	if n := len(w.paths); n > 0 {
+		path = w.paths[n-1]
+	}
+	if err := w.closeCurrentVolume(false); err != nil {
+		return err
+	}
+
+	if path != "" {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if n := len(w.paths); n > 0 && w.paths[n-1] == path {
+			w.paths = w.paths[:n-1]
+		}
+	}
+	if w.nextPart > 0 {
+		w.nextPart--
+	}
+	return nil
+}
+
+func (w *MultiVolumeWriter) volumeTooSmallOnEmptyCurrent() error {
+	if err := w.cleanupEmptyCurrentVolume(); err != nil {
+		w.latchFailure(err)
+		return err
+	}
+	return errVolumeTooSmall
 }
 
 func patchMainVolumeFlag(f *os.File, set bool) error {
