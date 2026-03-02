@@ -116,6 +116,30 @@ func TestVolumePathsContinuationThreeDigitWidth(t *testing.T) {
 	}
 }
 
+func TestVolumePathsFromA100PrefersCanonicalTwoDigitFamilyWhenAmbiguous(t *testing.T) {
+	tmp := t.TempDir()
+	base := filepath.Join(tmp, "set")
+
+	mustWriteFile(t, base+".arj", []byte("x"))
+	for i := 1; i <= 99; i++ {
+		mustWriteFile(t, fmt.Sprintf("%s.a%02d", base, i), []byte("x"))
+	}
+	mustWriteFile(t, base+".a100", []byte("x"))
+	// Stale/unrelated 3-digit part 1 should not win when opening from .a100.
+	mustWriteFile(t, base+".a001", []byte("x"))
+
+	got, err := VolumePaths(base + ".a100")
+	if err != nil {
+		t.Fatalf("VolumePaths(.a100): %v", err)
+	}
+	if gotPart1, want := got[1], base+".a01"; gotPart1 != want {
+		t.Fatalf("VolumePaths(.a100) first continuation = %q, want %q", gotPart1, want)
+	}
+	if gotLast, want := got[len(got)-1], base+".a100"; gotLast != want {
+		t.Fatalf("VolumePaths(.a100) last continuation = %q, want %q", gotLast, want)
+	}
+}
+
 func TestVolumePathsRequiresRequestedContinuationPathToExist(t *testing.T) {
 	tmp := t.TempDir()
 	base := filepath.Join(tmp, "set")

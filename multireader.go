@@ -181,6 +181,7 @@ func volumePaths(name string, maxVolumes int) ([]string, error) {
 		if _, err := resolveContinuationInputPath(name, stem, part, width); err != nil {
 			return nil, err
 		}
+		width = continuationPreferredWidth(part, width)
 		first, err := resolveFirstVolumePath(stem)
 		if err != nil {
 			return nil, err
@@ -343,6 +344,20 @@ func continuationWidths(preferred int) []int {
 	appendWidth(2)
 	appendWidth(3)
 	return widths
+}
+
+func continuationPreferredWidth(part, width int) int {
+	if part < 1 || width < 2 {
+		return 0
+	}
+	minWidth := len(strconv.Itoa(part))
+	if minWidth < 2 {
+		minWidth = 2
+	}
+	if width <= minWidth {
+		return 0
+	}
+	return width
 }
 
 func pathExists(path string) (bool, error) {
