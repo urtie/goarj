@@ -257,6 +257,18 @@ func TestSecurityModesRejectSecuredDirectoryOnOpenAndExtract(t *testing.T) {
 	assertUnsupportedModeError(t, err, UnsupportedModeKindSecured, UnsupportedSecurityModeEnvelope, FlagSecured, 0)
 }
 
+func TestSecurityModesRejectSecuredDirectoryOnExtractAllStream(t *testing.T) {
+	archive := writeSecurityModeDirectoryArchive(t)
+	localOff := firstLocalHeaderOffset(t, archive)
+	archive = addHeaderFlags(t, archive, localOff, FlagSecured)
+
+	err := ExtractAllStream(bytes.NewReader(archive), t.TempDir())
+	if !errors.Is(err, ErrSecurityMode) {
+		t.Fatalf("ExtractAllStream error = %v, want %v", err, ErrSecurityMode)
+	}
+	assertUnsupportedModeError(t, err, UnsupportedModeKindSecured, UnsupportedSecurityModeEnvelope, FlagSecured, 0)
+}
+
 func TestSecurityModesRejectMainSecuredDirectoryArchiveOnExtract(t *testing.T) {
 	archive := writeSecurityModeDirectoryArchive(t)
 	mainOff, err := findMainHeaderOffset(bytes.NewReader(archive), int64(len(archive)))

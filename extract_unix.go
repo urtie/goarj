@@ -101,6 +101,8 @@ func (r *StreamReader) extractAllWithOptions(dir string, opts ExtractOptions) er
 
 	quota := &extractQuota{opts: opts}
 	dirs := make(map[string]extractedDir)
+	password := r.passwordBytes()
+	defer clearBytes(password)
 	for {
 		h, rc, err := r.Next()
 		if errors.Is(err, io.EOF) {
@@ -120,6 +122,10 @@ func (r *StreamReader) extractAllWithOptions(dir string, opts ExtractOptions) er
 		}
 
 		if h.isDir() {
+			if err := unsupportedStreamOpenModeError(r, *h, password); err != nil {
+				abortStreamReadCloser(rc)
+				return err
+			}
 			if err := root.mkdirAll(rel, h.Name); err != nil {
 				abortStreamReadCloser(rc)
 				return err
