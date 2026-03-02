@@ -169,7 +169,6 @@ func extractOneFilePath(root, path, name string, f *File, quota *extractQuota) (
 	if err != nil {
 		return err
 	}
-	defer rc.Close()
 
 	if err := ensureNoSymlinkComponents(root, path, name, true); err != nil {
 		return err
@@ -190,6 +189,9 @@ func extractOneFilePath(root, path, name string, f *File, quota *extractQuota) (
 	}()
 
 	if _, err := copyExtractData(&extractQuotaWriter{dst: tmp, quota: quota}, rc); err != nil {
+		return errors.Join(err, rc.Close())
+	}
+	if err := rc.Close(); err != nil {
 		return err
 	}
 

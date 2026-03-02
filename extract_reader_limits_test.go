@@ -125,6 +125,33 @@ func TestExtractAllPreOpenQuotaCheckBeforeDecompressorPath(t *testing.T) {
 	}
 }
 
+func TestExtractAllPropagatesEntryCloseErrorAfterSuccessfulCopy(t *testing.T) {
+	payload := []byte("close-error-payload")
+	archive := writeSingleFileArchive(t, &FileHeader{
+		Name:   "close-error.bin",
+		Method: Store,
+	}, string(payload))
+
+	r, err := NewReader(bytes.NewReader(archive), int64(len(archive)))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+
+	wantCloseErr := errors.New("decompressor close failed")
+	r.RegisterDecompressor(Store, func(in io.Reader) io.ReadCloser {
+		return &closeErrReadCloser{
+			Reader:   in,
+			closeErr: wantCloseErr,
+		}
+	})
+
+	out := filepath.Join(t.TempDir(), "out")
+	err = r.ExtractAll(out)
+	if !errors.Is(err, wantCloseErr) {
+		t.Fatalf("ExtractAll error = %v, want %v", err, wantCloseErr)
+	}
+}
+
 func TestNewReaderWithOptionsMaxEntriesBoundaryInclusive(t *testing.T) {
 	buildArchive := func(entryCount int) []byte {
 		t.Helper()
@@ -447,5 +474,14 @@ func (r *eofOnceCloseErrReader) Read(p []byte) (int, error) {
 }
 
 func (r *eofOnceCloseErrReader) Close() error {
+	return r.closeErr
+}
+
+type closeErrReadCloser struct {
+	io.Reader
+	closeErr error
+}
+
+func (r *closeErrReadCloser) Close() error {
 	return r.closeErr
 }

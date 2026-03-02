@@ -265,7 +265,6 @@ func (r *unixExtractRoot) extractOneFile(relPath, entryName string, f *File, quo
 	if err != nil {
 		return err
 	}
-	defer rc.Close()
 
 	runExtractTestHookBeforeCreate(entryName)
 
@@ -294,6 +293,9 @@ func (r *unixExtractRoot) extractOneFile(relPath, entryName string, f *File, quo
 	}()
 
 	if _, err := copyExtractData(&extractQuotaWriter{dst: tmpFile, quota: quota}, rc); err != nil {
+		return errors.Join(err, rc.Close())
+	}
+	if err := rc.Close(); err != nil {
 		return err
 	}
 	if err := applyExtractMetadataToFD(int(tmpFile.Fd()), entryName, f.Mode(), f.ModTime()); err != nil {
