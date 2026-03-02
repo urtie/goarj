@@ -475,6 +475,42 @@ func TestMultiVolumeWriterCreateRawRejectsOversizeForSingleVolume(t *testing.T) 
 	}
 }
 
+func TestMultiVolumeWriterCloseFinalizesAfterStagedRawCloseFailure(t *testing.T) {
+	archivePath := filepath.Join(t.TempDir(), "raw-too-large-close.arj")
+	mw, err := NewMultiVolumeWriter(archivePath, MultiVolumeWriterOptions{VolumeSize: 96})
+	if err != nil {
+		t.Fatalf("NewMultiVolumeWriter: %v", err)
+	}
+
+	payload := bytes.Repeat([]byte("x"), 64)
+	fw, err := mw.CreateRaw(&FileHeader{
+		Name:               "raw.bin",
+		Method:             Store,
+		CRC32:              crc32.ChecksumIEEE(payload),
+		CompressedSize64:   uint64(len(payload)),
+		UncompressedSize64: uint64(len(payload)),
+	})
+	if err != nil {
+		t.Fatalf("CreateRaw: %v", err)
+	}
+	if _, err := fw.Write(payload); err != nil {
+		t.Fatalf("Write raw payload: %v", err)
+	}
+
+	if err := mw.Close(); !errors.Is(err, ErrRawEntryTooLargeForVolume) {
+		t.Fatalf("Close multi writer error = %v, want %v", err, ErrRawEntryTooLargeForVolume)
+	}
+
+	r, err := OpenReader(archivePath)
+	if err != nil {
+		t.Fatalf("OpenReader after Close error: %v", err)
+	}
+	defer r.Close()
+	if got, want := len(r.File), 0; got != want {
+		t.Fatalf("file count = %d, want %d", got, want)
+	}
+}
+
 func TestMultiVolumeWriterCompressorSnapshotPerEntry(t *testing.T) {
 	const method uint16 = 251
 	archivePath := filepath.Join(t.TempDir(), "snapshot-compressor.arj")

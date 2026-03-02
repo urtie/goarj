@@ -643,6 +643,12 @@ func (w *MultiVolumeWriter) Close() error {
 			if w.failed != nil {
 				return w.failed
 			}
+			closeErr := w.closeCurrentVolume(false)
+			w.closed = true
+			w.last = nil
+			if closeErr != nil {
+				return errors.Join(err, closeErr)
+			}
 			return err
 		}
 	}
