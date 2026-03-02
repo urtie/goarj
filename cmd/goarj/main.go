@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	goarj "github.com/urtie/goarj"
 )
@@ -53,6 +54,9 @@ func runArchive(args []string, stdout io.Writer) error {
 	if !sourceInfo.IsDir() && !sourceInfo.Mode().IsRegular() {
 		return fmt.Errorf("source %q: must be a directory or regular file", sourcePath)
 	}
+	if err := validateArchiveDestinationPath(archivePath, sourcePath, sourceInfo); err != nil {
+		return err
+	}
 
 	out, err := os.Create(archivePath)
 	if err != nil {
@@ -77,6 +81,58 @@ func runArchive(args []string, stdout io.Writer) error {
 
 	_, _ = fmt.Fprintf(stdout, "created %s from %s\n", archivePath, sourcePath)
 	return nil
+}
+
+func validateArchiveDestinationPath(archivePath, sourcePath string, sourceInfo fs.FileInfo) error {
+	absArchivePath, err := filepath.Abs(filepath.Clean(archivePath))
+	if err != nil {
+		return fmt.Errorf("resolve archive path %q: %w", archivePath, err)
+	}
+	absSourcePath, err := filepath.Abs(filepath.Clean(sourcePath))
+	if err != nil {
+		return fmt.Errorf("resolve source path %q: %w", sourcePath, err)
+	}
+
+	if sourceInfo.IsDir() {
+		insideSource, err := pathContains(absSourcePath, absArchivePath)
+		if err != nil {
+			return fmt.Errorf("compare archive/source paths: %w", err)
+		}
+		if insideSource {
+			return fmt.Errorf("archive path %q must be outside source directory %q", archivePath, sourcePath)
+		}
+		return nil
+	}
+
+	if absArchivePath == absSourcePath {
+		return fmt.Errorf("archive path %q must differ from source file %q", archivePath, sourcePath)
+	}
+
+	archiveInfo, err := os.Stat(absArchivePath)
+	if err == nil {
+		if os.SameFile(sourceInfo, archiveInfo) {
+			return fmt.Errorf("archive path %q resolves to source file %q", archivePath, sourcePath)
+		}
+		return nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat archive %q: %w", archivePath, err)
+	}
+	return nil
+}
+
+func pathContains(rootPath, path string) (bool, error) {
+	rel, err := filepath.Rel(rootPath, path)
+	if err != nil {
+		return false, err
+	}
+	if rel == "." {
+		return true, nil
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return false, nil
+	}
+	return true, nil
 }
 
 func addSource(writer *goarj.Writer, sourcePath string, sourceInfo fs.FileInfo) error {

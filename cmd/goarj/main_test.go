@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -113,6 +114,54 @@ func TestRunExtractIgnoresSiblingVolumeLikeFiles(t *testing.T) {
 	}
 
 	checkFileContent(t, filepath.Join(outDir, "testfile"), "payload")
+}
+
+func TestRunArchiveRejectsArchiveInsideSourceDirectory(t *testing.T) {
+	tmp := t.TempDir()
+
+	sourceDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll source: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "file.txt"), []byte("payload"), 0o644); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+
+	archivePath := filepath.Join(sourceDir, "archive.arj")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run([]string{"archive", archivePath, sourceDir}, &stdout, &stderr)
+	if err == nil {
+		t.Fatalf("run archive error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "outside source directory") {
+		t.Fatalf("run archive error = %q, want outside-source-directory message", err)
+	}
+	if _, statErr := os.Stat(archivePath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("archive path stat error = %v, want %v", statErr, os.ErrNotExist)
+	}
+}
+
+func TestRunArchiveRejectsArchivePathEqualToSourceFile(t *testing.T) {
+	tmp := t.TempDir()
+
+	sourcePath := filepath.Join(tmp, "data.txt")
+	const original = "ORIGINAL"
+	if err := os.WriteFile(sourcePath, []byte(original), 0o644); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run([]string{"archive", sourcePath, sourcePath}, &stdout, &stderr)
+	if err == nil {
+		t.Fatalf("run archive error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "must differ from source file") &&
+		!strings.Contains(err.Error(), "resolves to source file") {
+		t.Fatalf("run archive error = %q, want source-file-overlap message", err)
+	}
+	checkFileContent(t, sourcePath, original)
 }
 
 func TestRunUsageErrors(t *testing.T) {
