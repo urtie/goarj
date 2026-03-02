@@ -315,6 +315,41 @@ func TestNewStreamReaderSkipsCorruptMainHeaderCandidate(t *testing.T) {
 	}
 }
 
+func TestStreamReaderCustomDecompressorReturningNilYieldsErrAlgorithm(t *testing.T) {
+	archive := buildStreamArchive(t, []streamTestEntry{
+		{
+			header:  FileHeader{Name: "nil-decompressor.bin", Method: Store},
+			payload: []byte("payload"),
+		},
+	})
+
+	sr, err := NewStreamReader(bytes.NewReader(archive))
+	if err != nil {
+		t.Fatalf("NewStreamReader: %v", err)
+	}
+	sr.RegisterDecompressor(Store, func(io.Reader) io.ReadCloser { return nil })
+
+	_, rc, err := sr.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if rc == nil {
+		t.Fatal("Next reader = nil, want non-nil")
+	}
+	defer rc.Close()
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("ReadAll panic = %v, want nil panic", recovered)
+		}
+	}()
+
+	_, err = io.ReadAll(rc)
+	if !errors.Is(err, ErrAlgorithm) {
+		t.Fatalf("ReadAll error = %v, want %v", err, ErrAlgorithm)
+	}
+}
+
 func TestNewStreamReaderRejectsTruncatedTailSignatureCandidate(t *testing.T) {
 	stream := []byte{0x11, 0x22, arjHeaderID1, arjHeaderID2}
 	_, err := NewStreamReader(bytes.NewReader(stream))

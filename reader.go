@@ -545,6 +545,12 @@ func (f *File) openSegment(segment fileSegment, password []byte) (io.ReadCloser,
 		in = wrapMethod14DecompressorInput(in, size, segment.uncompressedSize, limits)
 	}
 	rc := dcomp(in)
+	if rc == nil {
+		if garbled != nil {
+			garbled.clearSensitiveData()
+		}
+		return nil, ErrAlgorithm
+	}
 	if garbled != nil {
 		rc = &garbledReaderCloser{
 			ReadCloser: rc,

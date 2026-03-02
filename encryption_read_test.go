@@ -443,6 +443,31 @@ func TestReaderRegisterDecompressorNilDisablesFallback(t *testing.T) {
 	}
 }
 
+func TestReaderCustomDecompressorReturningNilYieldsErrAlgorithm(t *testing.T) {
+	archive := writeSingleFileArchive(t, &FileHeader{
+		Name:   "nil-decompressor.bin",
+		Method: Store,
+	}, "payload")
+
+	r, err := NewReader(bytes.NewReader(archive), int64(len(archive)))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+
+	r.RegisterDecompressor(Store, func(io.Reader) io.ReadCloser { return nil })
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("Open panic = %v, want nil panic", recovered)
+		}
+	}()
+
+	_, err = r.File[0].Open()
+	if !errors.Is(err, ErrAlgorithm) {
+		t.Fatalf("Open error = %v, want %v", err, ErrAlgorithm)
+	}
+}
+
 func TestMultiSegmentOpenUsesLazySegmentOpen(t *testing.T) {
 	archive := writeSingleFileArchive(t, &FileHeader{
 		Name:   "lazy-segments.bin",

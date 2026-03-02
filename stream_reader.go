@@ -381,6 +381,12 @@ func (r *streamEntryReadCloser) open() error {
 		in = wrapMethod14DecompressorInput(in, int64(r.header.CompressedSize64), r.header.UncompressedSize64, r.limits)
 	}
 	rc := dcomp(in)
+	if rc == nil {
+		if garbled != nil {
+			garbled.clearSensitiveData()
+		}
+		return ErrAlgorithm
+	}
 	if garbled != nil {
 		rc = &garbledReaderCloser{
 			ReadCloser: rc,
