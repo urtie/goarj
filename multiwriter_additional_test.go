@@ -802,6 +802,43 @@ func TestMultiVolumeWriterEmptyCompressedEntryRoundTrip(t *testing.T) {
 	}
 }
 
+func TestMultiVolumeWriterEmptyCompressedEntryFinalizesCustomCompressor(t *testing.T) {
+	const method uint16 = 250
+
+	archivePath := filepath.Join(t.TempDir(), "empty-compressed-custom.arj")
+	mw, err := NewMultiVolumeWriter(archivePath, MultiVolumeWriterOptions{VolumeSize: 32 << 10})
+	if err != nil {
+		t.Fatalf("NewMultiVolumeWriter: %v", err)
+	}
+	mw.RegisterCompressor(method, taggedSnapshotCompressor('Z'))
+
+	fw, err := mw.CreateHeader(&FileHeader{Name: "empty.bin", Method: method})
+	if err != nil {
+		t.Fatalf("CreateHeader: %v", err)
+	}
+	if err := fw.(io.Closer).Close(); err != nil {
+		t.Fatalf("Close entry: %v", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("Close writer: %v", err)
+	}
+
+	r, err := OpenMultiReader(archivePath)
+	if err != nil {
+		t.Fatalf("OpenMultiReader: %v", err)
+	}
+	defer r.Close()
+	if got, want := len(r.File), 1; got != want {
+		t.Fatalf("file count = %d, want %d", got, want)
+	}
+	if got, want := r.File[0].CompressedSize64, uint64(2); got != want {
+		t.Fatalf("compressed size = %d, want %d", got, want)
+	}
+	if got, want := mustReadRawFileEntry(t, r.File[0]), []byte{'Z', 0}; !bytes.Equal(got, want) {
+		t.Fatalf("raw payload = %v, want %v", got, want)
+	}
+}
+
 func TestPatchMainVolumeFlagMalformedAndSuccess(t *testing.T) {
 	t.Run("malformed signature", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "bad-signature.bin")

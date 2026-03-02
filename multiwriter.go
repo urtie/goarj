@@ -1056,7 +1056,8 @@ func (w *multiVolumeCompressedFileWriter) emitEmptySegment() error {
 		if err != nil {
 			return err
 		}
-		if int64(overhead) > w.w.currentRemaining() {
+		maxComp := w.w.currentRemaining() - int64(overhead)
+		if maxComp < 0 {
 			if !w.w.currentHasEntries {
 				return w.w.volumeTooSmallOnEmptyCurrent()
 			}
@@ -1066,7 +1067,27 @@ func (w *multiVolumeCompressedFileWriter) emitEmptySegment() error {
 			}
 			continue
 		}
-		return w.writeSegment(h, 0, nil, crc32.ChecksumIEEE(nil))
+		comp, fit, crc, err := w.w.compressDataFromReaderWithCompressorAndCRC(
+			h.Method,
+			bytes.NewReader(nil),
+			maxComp,
+			w.compressor,
+			w.method14InputLimit,
+		)
+		if err != nil {
+			return err
+		}
+		if !fit {
+			if !w.w.currentHasEntries {
+				return w.w.volumeTooSmallOnEmptyCurrent()
+			}
+			w.lastSegment = nil
+			if err := w.w.closeCurrentVolume(true); err != nil {
+				return err
+			}
+			continue
+		}
+		return w.writeSegment(h, 0, comp, crc)
 	}
 }
 
