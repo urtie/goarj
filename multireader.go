@@ -492,7 +492,6 @@ func validateVolumeMainHeaderCoherence(volumes []*Reader) error {
 	baseComment := volumes[0].Comment
 	baseMainExt := base.MainExtendedHeaders
 	baseFirstHeaderExtra := base.FirstHeaderExtra
-	sawVolumeFlagSet := base.Flags&FlagVolume != 0
 	sawVolumeFlagClear := base.Flags&FlagVolume == 0
 
 	for i := 1; i < len(volumes); i++ {
@@ -515,9 +514,6 @@ func validateVolumeMainHeaderCoherence(volumes []*Reader) error {
 		}
 			if !hasVolumeFlag {
 				sawVolumeFlagClear = true
-			}
-			if hasVolumeFlag {
-				sawVolumeFlagSet = true
 			}
 
 		switch {
@@ -555,9 +551,6 @@ func validateVolumeMainHeaderCoherence(volumes []*Reader) error {
 			return inconsistentVolumeMainHeaderError("ProtectionReserved", i)
 			}
 		}
-	if len(volumes) > 1 && !sawVolumeFlagSet {
-		return ErrFormat
-	}
 	return nil
 }
 
@@ -600,7 +593,16 @@ func mergeVolumeReaders(merged *Reader, volumes []*Reader, starts []int64, r io.
 	merged.Comment = volumes[0].Comment
 	merged.baseOffset = starts[0] + volumes[0].baseOffset
 
+	sawMainVolumeTopology := false
+	for _, volume := range volumes {
+		if volume.ArchiveHeader.Flags&FlagVolume != 0 {
+			sawMainVolumeTopology = true
+			break
+		}
+	}
+
 	pending := make(map[string][]*File)
+	sawSplitTopology := len(volumes) == 1
 	for volumeIdx, volume := range volumes {
 		base := starts[volumeIdx]
 		for _, sf := range volume.File {
@@ -613,6 +615,9 @@ func mergeVolumeReaders(merged *Reader, volumes []*Reader, starts []int64, r io.
 				compressedSize:   sf.CompressedSize64,
 				uncompressedSize: sf.UncompressedSize64,
 				crc32:            sf.CRC32,
+			}
+			if segment.flags&(FlagVolume|FlagExtFile) != 0 {
+				sawSplitTopology = true
 			}
 			if sf.Flags&FlagExtFile == 0 {
 				if len(merged.File) >= maxEntries {
@@ -667,6 +672,9 @@ func mergeVolumeReaders(merged *Reader, volumes []*Reader, starts []int64, r io.
 		if len(queue) != 0 {
 			return ErrFormat
 		}
+	}
+	if len(volumes) > 1 && !sawSplitTopology && !sawMainVolumeTopology {
+		return ErrFormat
 	}
 
 	return nil
