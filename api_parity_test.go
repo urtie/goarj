@@ -68,6 +68,20 @@ func TestReaderOpen(t *testing.T) {
 	}
 }
 
+func TestReaderOpenNilReceiver(t *testing.T) {
+	var r *Reader
+
+	_, err := r.Open("open.txt")
+	if !errors.Is(err, ErrFormat) {
+		t.Fatalf("Open error = %v, want %v", err, ErrFormat)
+	}
+
+	_, err = r.Open("../x")
+	if !errors.Is(err, fs.ErrInvalid) {
+		t.Fatalf("Open invalid path error = %v, want %v", err, fs.ErrInvalid)
+	}
+}
+
 func TestReaderOpenInvalidPath(t *testing.T) {
 	var buf bytes.Buffer
 	w := NewWriter(&buf)

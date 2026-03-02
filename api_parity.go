@@ -15,6 +15,9 @@ func (r *Reader) Open(name string) (fs.File, error) {
 	if !fs.ValidPath(name) {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
 	}
+	if r == nil {
+		return nil, ErrFormat
+	}
 
 	idx := r.fsIndexSnapshot()
 	if f, ok := idx.files[name]; ok {
