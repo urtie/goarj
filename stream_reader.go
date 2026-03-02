@@ -199,7 +199,6 @@ func (r *StreamReader) Next() (*FileHeader, io.ReadCloser, error) {
 			R: r.br,
 			N: int64(f.CompressedSize64),
 		},
-		limits: r.method14DecodeLimits(),
 	}
 	r.current = entry
 	return &entry.header, entry, nil
@@ -363,8 +362,13 @@ func (r *streamEntryReadCloser) open() error {
 	if err := unsupportedStreamOpenModeError(r.owner, r.header, password); err != nil {
 		return fail(err)
 	}
+	limits := normalizeMethod14DecodeLimits(Method14DecodeLimits{})
+	if r.owner != nil {
+		limits = r.owner.method14DecodeLimits()
+	}
+	r.limits = limits
 	if isNativeMethod14(r.header.Method) {
-		if err := validateMethod14DecodeSizes(r.limits, r.header.CompressedSize64, r.header.UncompressedSize64); err != nil {
+		if err := validateMethod14DecodeSizes(limits, r.header.CompressedSize64, r.header.UncompressedSize64); err != nil {
 			return fail(err)
 		}
 	}
@@ -386,7 +390,7 @@ func (r *streamEntryReadCloser) open() error {
 		in = garbled
 	}
 	if isNativeMethod14(r.header.Method) {
-		in = wrapMethod14DecompressorInput(in, int64(r.header.CompressedSize64), r.header.UncompressedSize64, r.limits)
+		in = wrapMethod14DecompressorInput(in, int64(r.header.CompressedSize64), r.header.UncompressedSize64, limits)
 	}
 	rc := dcomp(in)
 	if rc == nil {

@@ -383,6 +383,40 @@ func TestStreamReaderOpenErrorIsStickyAcrossReads(t *testing.T) {
 	}
 }
 
+func TestStreamReaderMethod14DecodeLimitsSetAfterNextApplyOnFirstRead(t *testing.T) {
+	payload := bytes.Repeat([]byte("method14-limit-check-"), 32)
+	archive := buildStreamArchive(t, []streamTestEntry{
+		{
+			header:  FileHeader{Name: "limit.bin", Method: Method1},
+			payload: payload,
+		},
+	})
+
+	sr, err := NewStreamReader(bytes.NewReader(archive))
+	if err != nil {
+		t.Fatalf("NewStreamReader: %v", err)
+	}
+
+	_, rc, err := sr.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if rc == nil {
+		t.Fatal("Next reader = nil, want non-nil")
+	}
+	defer rc.Close()
+
+	sr.SetMethod14DecodeLimits(Method14DecodeLimits{
+		MaxCompressedSize:   1,
+		MaxUncompressedSize: 1,
+	})
+
+	_, err = io.ReadAll(rc)
+	if !errors.Is(err, ErrFormat) {
+		t.Fatalf("ReadAll error = %v, want %v", err, ErrFormat)
+	}
+}
+
 func TestNewStreamReaderRejectsTruncatedTailSignatureCandidate(t *testing.T) {
 	stream := []byte{0x11, 0x22, arjHeaderID1, arjHeaderID2}
 	_, err := NewStreamReader(bytes.NewReader(stream))
