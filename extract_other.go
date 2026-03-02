@@ -467,10 +467,13 @@ func restoreExtractCommitBackup(path, entryName, backupPath string) error {
 			return extractPathError(path, statErr)
 		}
 		if info.Mode()&os.ModeSymlink != 0 || info.IsDir() {
-			return insecureExtractPathError(entryName)
-		}
-		if removeErr := os.Remove(path); removeErr != nil {
-			return extractPathError(path, removeErr)
+			if removeErr := os.Remove(path); removeErr != nil {
+				return insecureExtractPathError(entryName)
+			}
+		} else {
+			if removeErr := os.Remove(path); removeErr != nil {
+				return extractPathError(path, removeErr)
+			}
 		}
 		if retryErr := os.Rename(backupPath, path); retryErr != nil {
 			return extractPathError(path, retryErr)

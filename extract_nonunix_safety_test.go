@@ -666,6 +666,70 @@ func TestNonUnixExtractAllRenameFallbackIdentityMismatchRestoresDestination(t *t
 	}
 }
 
+func TestNonUnixExtractAllRenameFallbackSymlinkSwapRestoresDestination(t *testing.T) {
+	tmp := t.TempDir()
+	archivePath := filepath.Join(tmp, "rename-fallback-symlink-swap-restore.arj")
+	entryName := "note.txt"
+	nonUnixWriteExtractArchive(t, archivePath, []nonUnixExtractEntry{
+		{
+			header:  nonUnixBuildExtractHeader(entryName, 0o640, time.Date(2024, time.May, 17, 3, 2, 3, 0, time.UTC)),
+			payload: []byte("replacement"),
+		},
+	})
+
+	r, err := OpenReader(archivePath)
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer r.Close()
+
+	out := filepath.Join(tmp, "out")
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatalf("MkdirAll(out): %v", err)
+	}
+	target := filepath.Join(out, entryName)
+	originalPayload := []byte("original")
+	if err := os.WriteFile(target, originalPayload, 0o600); err != nil {
+		t.Fatalf("WriteFile(target): %v", err)
+	}
+
+	outside := filepath.Join(tmp, "outside")
+	if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
+		t.Fatalf("WriteFile(outside): %v", err)
+	}
+
+	prevHook := extractTestHookAfterNonUnixCommitRename
+	extractTestHookAfterNonUnixCommitRename = func(name, destination string) error {
+		if name != entryName {
+			return nil
+		}
+		movedPath := destination + ".moved"
+		if err := os.Rename(destination, movedPath); err != nil {
+			t.Fatalf("Rename(destination -> moved): %v", err)
+		}
+		nonUnixSymlinkOrSkip(t, outside, destination)
+		t.Cleanup(func() {
+			_ = os.Remove(destination)
+			_ = os.Remove(movedPath)
+		})
+		return nil
+	}
+	t.Cleanup(func() {
+		extractTestHookAfterNonUnixCommitRename = prevHook
+	})
+
+	err = r.ExtractAll(out)
+	assertNonUnixExtractInsecurePathError(t, err, entryName)
+
+	gotPayload, readErr := os.ReadFile(target)
+	if readErr != nil {
+		t.Fatalf("ReadFile(target): %v", readErr)
+	}
+	if string(gotPayload) != string(originalPayload) {
+		t.Fatalf("target payload = %q, want %q", gotPayload, originalPayload)
+	}
+}
+
 func TestNonUnixExtractAllRejectsSwappedTempPathBeforeTimestamp(t *testing.T) {
 	tmp := t.TempDir()
 	archivePath := filepath.Join(tmp, "temp-metadata-path-swap-race.arj")
