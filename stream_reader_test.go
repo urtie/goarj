@@ -297,6 +297,140 @@ func TestStreamReaderWithOptionsMaxEntries(t *testing.T) {
 	}
 }
 
+func TestStreamReaderNextRejectsCorruptLocalExtendedHeaderCRC(t *testing.T) {
+	archive := buildStreamArchive(t, []streamTestEntry{
+		{
+			header: FileHeader{
+				Name:                 "crc.bin",
+				Method:               Store,
+				LocalExtendedHeaders: [][]byte{{0x01, 0x02, 0x03, 0x04}},
+			},
+			payload: []byte("payload"),
+		},
+	})
+	corrupt := corruptFirstLocalExtendedHeaderCRC(t, archive)
+
+	sr, err := NewStreamReader(bytes.NewReader(corrupt))
+	if err != nil {
+		t.Fatalf("NewStreamReader: %v", err)
+	}
+
+	if _, _, err := sr.Next(); !errors.Is(err, ErrFormat) {
+		t.Fatalf("Next error = %v, want %v", err, ErrFormat)
+	}
+}
+
+func TestStreamReaderNextRejectsTruncatedLocalExtendedHeader(t *testing.T) {
+	archive := buildStreamArchive(t, []streamTestEntry{
+		{
+			header: FileHeader{
+				Name:                 "truncated.bin",
+				Method:               Store,
+				LocalExtendedHeaders: [][]byte{{0x10, 0x20, 0x30, 0x40}},
+			},
+			payload: []byte("payload"),
+		},
+	})
+	truncated := append([]byte(nil), archive...)
+	localOff := skipHeaderBlock(t, truncated, 0)
+
+	if localOff+4 > len(truncated) {
+		t.Fatalf("missing local header at offset %d", localOff)
+	}
+	basicSize := int(binary.LittleEndian.Uint16(truncated[localOff+2 : localOff+4]))
+	extStart := localOff + 4 + basicSize + 4
+	if extStart+2 > len(truncated) {
+		t.Fatalf("missing local extended-header size at offset %d", extStart)
+	}
+	extSize := int(binary.LittleEndian.Uint16(truncated[extStart : extStart+2]))
+	if extSize == 0 {
+		t.Fatal("expected local extended header")
+	}
+
+	// Keep only part of the first extended-header CRC to force malformed input.
+	cut := extStart + 2 + extSize + 1
+	if cut >= len(truncated) {
+		t.Fatalf("invalid truncate cut offset %d for archive size %d", cut, len(truncated))
+	}
+	truncated = truncated[:cut]
+
+	sr, err := NewStreamReader(bytes.NewReader(truncated))
+	if err != nil {
+		t.Fatalf("NewStreamReader: %v", err)
+	}
+
+	if _, _, err := sr.Next(); !errors.Is(err, ErrFormat) {
+		t.Fatalf("Next error = %v, want %v", err, ErrFormat)
+	}
+}
+
+func TestStreamReaderWithOptionsMaxExtendedHeaderCount(t *testing.T) {
+	archive := buildStreamArchive(t, []streamTestEntry{
+		{
+			header: FileHeader{
+				Name:                 "count-limit.bin",
+				Method:               Store,
+				LocalExtendedHeaders: [][]byte{[]byte("one"), []byte("two")},
+			},
+			payload: []byte("payload"),
+		},
+	})
+
+	sr, err := NewStreamReaderWithOptions(
+		bytes.NewReader(archive),
+		StreamReaderOptions{
+			ParserLimits: ParserLimits{
+				MaxExtendedHeaders: 1,
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("NewStreamReaderWithOptions: %v", err)
+	}
+
+	_, _, err = sr.Next()
+	if !errors.Is(err, ErrFormat) {
+		t.Fatalf("Next error = %v, want %v", err, ErrFormat)
+	}
+	if err == nil || !strings.Contains(err.Error(), "max extended headers exceeded") {
+		t.Fatalf("Next error = %v, want max extended headers exceeded", err)
+	}
+}
+
+func TestStreamReaderWithOptionsMaxExtendedHeaderBytes(t *testing.T) {
+	archive := buildStreamArchive(t, []streamTestEntry{
+		{
+			header: FileHeader{
+				Name:                 "bytes-limit.bin",
+				Method:               Store,
+				LocalExtendedHeaders: [][]byte{[]byte("abcd"), []byte("efgh")},
+			},
+			payload: []byte("payload"),
+		},
+	})
+
+	sr, err := NewStreamReaderWithOptions(
+		bytes.NewReader(archive),
+		StreamReaderOptions{
+			ParserLimits: ParserLimits{
+				MaxExtendedHeaders:     4,
+				MaxExtendedHeaderBytes: 7,
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("NewStreamReaderWithOptions: %v", err)
+	}
+
+	_, _, err = sr.Next()
+	if !errors.Is(err, ErrFormat) {
+		t.Fatalf("Next error = %v, want %v", err, ErrFormat)
+	}
+	if err == nil || !strings.Contains(err.Error(), "max extended header bytes exceeded") {
+		t.Fatalf("Next error = %v, want max extended header bytes exceeded", err)
+	}
+}
+
 func TestExtractAllStream(t *testing.T) {
 	archive := buildStreamArchive(t, []streamTestEntry{
 		{
