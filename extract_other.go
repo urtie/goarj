@@ -175,6 +175,12 @@ func extractOneFilePath(root, path, name string, f *File, quota *extractQuota) (
 	if err != nil {
 		return err
 	}
+	ownedRC := true
+	defer func() {
+		if ownedRC {
+			_ = rc.Close()
+		}
+	}()
 
 	if err := ensureNoSymlinkComponents(root, path, name, true); err != nil {
 		return err
@@ -195,11 +201,15 @@ func extractOneFilePath(root, path, name string, f *File, quota *extractQuota) (
 	}()
 
 	if _, err := copyExtractData(&extractQuotaWriter{dst: tmp, quota: quota}, rc); err != nil {
-		return errors.Join(err, rc.Close())
+		closeErr := rc.Close()
+		ownedRC = false
+		return errors.Join(err, closeErr)
 	}
 	if err := rc.Close(); err != nil {
+		ownedRC = false
 		return err
 	}
+	ownedRC = false
 
 	if err := applyExtractMetadataToTempFile(tmp, tmpPath, name, f.Mode(), f.ModTime()); err != nil {
 		return err
