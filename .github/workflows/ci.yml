@@ -12,6 +12,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -24,6 +26,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends arj
           command -v arj
+
+      - name: Verify LFS test fixtures are present
+        run: |
+          if grep -RIl --include='*.arj' 'https://git-lfs.github.com/spec/v1' testdata; then
+            echo "Found Git LFS pointer files in testdata; fixtures were not downloaded."
+            exit 1
+          fi
 
       - name: Run tests
         run: go test ./...
