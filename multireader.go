@@ -2,6 +2,7 @@ package arj
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -600,8 +601,12 @@ func mergeVolumeReaders(merged *Reader, volumes []*Reader, starts []int64, r io.
 			if len(queue) == 0 {
 				return ErrFormat
 			}
-			lf := queue[0]
-			pending[sf.Name] = queue[1:]
+			lf, queueIdx, err := selectPendingSplitLogicalFile(queue, sf)
+			if err != nil {
+				return err
+			}
+			queue = append(queue[:queueIdx], queue[queueIdx+1:]...)
+			pending[sf.Name] = queue
 
 			lf.segments = append(lf.segments, segment)
 			if lf.UncompressedSize64 > math.MaxUint64-segment.uncompressedSize {
@@ -631,6 +636,43 @@ func mergeVolumeReaders(merged *Reader, volumes []*Reader, starts []int64, r io.
 	}
 
 	return nil
+}
+
+func continuationResumeOffset(h FileHeader) (uint64, bool) {
+	if h.Flags&FlagExtFile == 0 || len(h.firstHeaderExtra) < 4 {
+		return 0, false
+	}
+	return uint64(binary.LittleEndian.Uint32(h.firstHeaderExtra[:4])), true
+}
+
+func selectPendingSplitLogicalFile(queue []*File, continuation *File) (*File, int, error) {
+	if len(queue) == 0 || continuation == nil {
+		return nil, -1, ErrFormat
+	}
+	resumeOff, hasResume := continuationResumeOffset(continuation.FileHeader)
+	if !hasResume {
+		if len(queue) != 1 {
+			return nil, -1, ErrFormat
+		}
+		return queue[0], 0, nil
+	}
+	matchIdx := -1
+	for i := range queue {
+		if queue[i] == nil {
+			continue
+		}
+		if queue[i].UncompressedSize64 != resumeOff {
+			continue
+		}
+		if matchIdx >= 0 {
+			return nil, -1, ErrFormat
+		}
+		matchIdx = i
+	}
+	if matchIdx < 0 {
+		return nil, -1, ErrFormat
+	}
+	return queue[matchIdx], matchIdx, nil
 }
 
 func cloneFileHeader(in FileHeader) FileHeader {

@@ -422,6 +422,68 @@ func TestOpenMultiReaderReconstructsContinuedSegments(t *testing.T) {
 	}
 }
 
+func TestOpenMultiReaderRejectsAmbiguousDuplicateNameContinuationChains(t *testing.T) {
+	tmp := t.TempDir()
+	base := filepath.Join(tmp, "ambiguous-dup")
+
+	partA1 := []byte("A1-")
+	partB1 := []byte("B1-")
+	partA2 := []byte("A2")
+	partB2 := []byte("B2")
+	resumeOff := uint32(len(partA1))
+
+	writeVolumeArchive(t, base+".arj", []volumeEntry{
+		{name: "dup.bin", flags: FlagVolume, payload: partA1},
+		{name: "dup.bin", flags: FlagVolume, payload: partB1},
+	})
+	writeVolumeArchive(t, base+".a01", []volumeEntry{
+		{name: "dup.bin", flags: FlagExtFile, payload: partA2, firstHeaderExtra: continuationHeaderExtra(resumeOff)},
+		{name: "dup.bin", flags: FlagExtFile, payload: partB2, firstHeaderExtra: continuationHeaderExtra(resumeOff)},
+	})
+
+	_, err := OpenMultiReader(base + ".arj")
+	if !errors.Is(err, ErrFormat) {
+		t.Fatalf("OpenMultiReader ambiguous duplicate chains error = %v, want %v", err, ErrFormat)
+	}
+}
+
+func TestOpenMultiReaderMatchesDuplicateNameContinuationsByResumeOffset(t *testing.T) {
+	tmp := t.TempDir()
+	base := filepath.Join(tmp, "resume-match")
+
+	partA1 := []byte("A1")
+	partB1 := []byte("B111")
+	partA2 := []byte("-A2")
+	partB2 := []byte("-B2")
+
+	writeVolumeArchive(t, base+".arj", []volumeEntry{
+		{name: "dup.bin", flags: FlagVolume, payload: partA1},
+		{name: "dup.bin", flags: FlagVolume, payload: partB1},
+	})
+	// Continuations are intentionally out of order; resume offsets disambiguate.
+	writeVolumeArchive(t, base+".a01", []volumeEntry{
+		{name: "dup.bin", flags: FlagExtFile, payload: partB2, firstHeaderExtra: continuationHeaderExtra(uint32(len(partB1)))},
+		{name: "dup.bin", flags: FlagExtFile, payload: partA2, firstHeaderExtra: continuationHeaderExtra(uint32(len(partA1)))},
+	})
+
+	multi, err := OpenMultiReader(base + ".arj")
+	if err != nil {
+		t.Fatalf("OpenMultiReader: %v", err)
+	}
+	defer multi.Close()
+
+	if got, want := len(multi.File), 2; got != want {
+		t.Fatalf("file count = %d, want %d", got, want)
+	}
+
+	if got, want := string(mustReadFileEntry(t, multi.File[0])), string(append(partA1, partA2...)); got != want {
+		t.Fatalf("first duplicate payload = %q, want %q", got, want)
+	}
+	if got, want := string(mustReadFileEntry(t, multi.File[1])), string(append(partB1, partB2...)); got != want {
+		t.Fatalf("second duplicate payload = %q, want %q", got, want)
+	}
+}
+
 func TestOpenMultiReaderWithOptionsMaxVolumes(t *testing.T) {
 	tmp := t.TempDir()
 	base := filepath.Join(tmp, "limited")
@@ -846,9 +908,10 @@ func TestConcatenatedReaderAtReadAtForwardProgressSearchCount(t *testing.T) {
 }
 
 type volumeEntry struct {
-	name    string
-	flags   uint8
-	payload []byte
+	name             string
+	flags            uint8
+	payload          []byte
+	firstHeaderExtra []byte
 }
 
 func writeVolumeArchive(t *testing.T, path string, entries []volumeEntry) {
@@ -861,6 +924,10 @@ func writeVolumeArchive(t *testing.T, path string, entries []volumeEntry) {
 			Name:   entry.name,
 			Method: Store,
 			Flags:  entry.flags,
+		}
+		if len(entry.firstHeaderExtra) != 0 {
+			h.FirstHeaderSize = uint8(arjMinFirstHeaderSize + len(entry.firstHeaderExtra))
+			h.firstHeaderExtra = append([]byte(nil), entry.firstHeaderExtra...)
 		}
 		fw, err := w.CreateHeader(h)
 		if err != nil {
@@ -876,6 +943,12 @@ func writeVolumeArchive(t *testing.T, path string, entries []volumeEntry) {
 	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
 		t.Fatalf("WriteFile(%s): %v", path, err)
 	}
+}
+
+func continuationHeaderExtra(resumeOff uint32) []byte {
+	out := make([]byte, 4)
+	binary.LittleEndian.PutUint32(out, resumeOff)
+	return out
 }
 
 func mustReadFileEntry(t *testing.T, f *File) []byte {
