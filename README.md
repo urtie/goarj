@@ -1,5 +1,7 @@
 # goarj
 
+[![PkgGoDev](https://pkg.go.dev/badge/github.com/urtie/goarj)](https://pkg.go.dev/github.com/urtie/goarj)
+
 `goarj` is a pure Go package for reading and writing ARJ archives, with no cgo dependency.
 
 It tries to feel close to `archive/zip`, so most of the flow is familiar:
