@@ -265,6 +265,14 @@ func TestNewStreamReaderSkipsInvalidSignatureCandidates(t *testing.T) {
 	}
 }
 
+func TestNewStreamReaderRejectsTruncatedTailSignatureCandidate(t *testing.T) {
+	stream := []byte{0x11, 0x22, arjHeaderID1, arjHeaderID2}
+	_, err := NewStreamReader(bytes.NewReader(stream))
+	if !errors.Is(err, ErrFormat) {
+		t.Fatalf("NewStreamReader error = %v, want %v", err, ErrFormat)
+	}
+}
+
 func TestStreamReaderWithOptionsMaxEntries(t *testing.T) {
 	archive := buildStreamArchive(t, []streamTestEntry{
 		{

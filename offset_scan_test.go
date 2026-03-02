@@ -188,6 +188,37 @@ func TestFindMainHeaderOffsetWithSignatureDensePrefix(t *testing.T) {
 	}
 }
 
+func TestFindMainHeaderOffsetHandlesSignatureSplitAcrossScanChunkBoundary(t *testing.T) {
+	real := buildSingleStoreArchive(t, "chunk-boundary.bin", []byte("boundary payload"))
+	if len(real) < 2 || real[0] != arjHeaderID1 || real[1] != arjHeaderID2 {
+		t.Fatalf("invalid real archive signature prefix")
+	}
+
+	prefix := bytes.Repeat([]byte{0x11}, mainHeaderScanChunkSize-1)
+	prefix[len(prefix)-1] = arjHeaderID1
+	container := append(append([]byte(nil), prefix...), real[1:]...)
+	want := int64(len(prefix) - 1)
+
+	got, err := findMainHeaderOffset(bytes.NewReader(container), int64(len(container)))
+	if err != nil {
+		t.Fatalf("findMainHeaderOffset: %v", err)
+	}
+	if got != want {
+		t.Fatalf("findMainHeaderOffset = %d, want %d", got, want)
+	}
+
+	r, err := NewReader(bytes.NewReader(container), int64(len(container)))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	if gotOff := r.BaseOffset(); gotOff != want {
+		t.Fatalf("BaseOffset = %d, want %d", gotOff, want)
+	}
+	if gotFiles, wantFiles := len(r.File), 1; gotFiles != wantFiles {
+		t.Fatalf("file count = %d, want %d", gotFiles, wantFiles)
+	}
+}
+
 func buildDecoyMainHeaderArchive(t *testing.T, name string, withTerminator bool) []byte {
 	t.Helper()
 
