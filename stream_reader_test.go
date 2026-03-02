@@ -265,6 +265,56 @@ func TestNewStreamReaderSkipsInvalidSignatureCandidates(t *testing.T) {
 	}
 }
 
+func TestNewStreamReaderSkipsCorruptMainHeaderCandidate(t *testing.T) {
+	archive := buildStreamArchive(t, []streamTestEntry{
+		{
+			header:  FileHeader{Name: "file.txt", Method: Store},
+			payload: []byte("ok"),
+		},
+	})
+
+	const decoyFirstHeaderSize = arjMinFirstHeaderSize
+	decoyBasic := make([]byte, decoyFirstHeaderSize+2)
+	decoyBasic[0] = decoyFirstHeaderSize
+	decoyBasic[6] = arjFileTypeMain
+	decoyBasic[decoyFirstHeaderSize] = 0
+	decoyBasic[decoyFirstHeaderSize+1] = 0
+	decoySize := len(decoyBasic)
+	decoy := make([]byte, 0, 2+2+decoySize+4)
+	decoy = append(decoy, arjHeaderID1, arjHeaderID2, byte(decoySize), byte(decoySize>>8))
+	decoy = append(decoy, decoyBasic...)
+	// CRC intentionally incorrect: this must be rejected by the scanner.
+	decoy = append(decoy, 0x00, 0x00, 0x00, 0x00)
+
+	stream := append(append([]byte(nil), decoy...), archive...)
+
+	sr, err := NewStreamReader(bytes.NewReader(stream))
+	if err != nil {
+		t.Fatalf("NewStreamReader: %v", err)
+	}
+	if got, want := sr.BaseOffset(), int64(len(decoy)); got != want {
+		t.Fatalf("BaseOffset = %d, want %d", got, want)
+	}
+
+	h, rc, err := sr.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if h.Name != "file.txt" {
+		t.Fatalf("entry name = %q, want %q", h.Name, "file.txt")
+	}
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if string(got) != "ok" {
+		t.Fatalf("payload = %q, want %q", got, "ok")
+	}
+}
+
 func TestNewStreamReaderRejectsTruncatedTailSignatureCandidate(t *testing.T) {
 	stream := []byte{0x11, 0x22, arjHeaderID1, arjHeaderID2}
 	_, err := NewStreamReader(bytes.NewReader(stream))

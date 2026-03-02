@@ -224,7 +224,16 @@ func scanToHeaderSignature(r *bufio.Reader) (int64, error) {
 			}
 			basicSize := int(binary.LittleEndian.Uint16(sizeBytes))
 			if basicSize >= arjMinFirstHeaderSize && basicSize <= arjMaxBasicHeaderSize {
-				return off - 2, nil
+				const crcSize = 4
+				candidateBytes, err := r.Peek(2 + basicSize + crcSize)
+				if err != nil {
+					return 0, normalizeHeaderReadError(err)
+				}
+				basic := candidateBytes[2 : 2+basicSize]
+				wantCRC := binary.LittleEndian.Uint32(candidateBytes[2+basicSize : 2+basicSize+crcSize])
+				if crc32.ChecksumIEEE(basic) == wantCRC && probeMainHeaderBasicValid(basic) {
+					return off - 2, nil
+				}
 			}
 		}
 		havePrev = true
