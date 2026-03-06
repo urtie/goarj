@@ -68,6 +68,26 @@ func TestSafeExtractPathRejectsInsecureNames(t *testing.T) {
 	}
 }
 
+func TestHasWindowsTrimmedPathComponent(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{name: "clean", path: "docs/readme.txt", want: false},
+		{name: "trailing dot file", path: "readme.txt.", want: true},
+		{name: "trailing space file", path: "readme.txt ", want: true},
+		{name: "trailing dot dir", path: "docs./readme.txt", want: true},
+		{name: "trailing space dir", path: "docs /readme.txt", want: true},
+	}
+
+	for _, tc := range tests {
+		if got := hasWindowsTrimmedPathComponent(tc.path); got != tc.want {
+			t.Fatalf("hasWindowsTrimmedPathComponent(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
 func TestEnsureNoSymlinkComponentsRejectsSymlinkRoot(t *testing.T) {
 	tmp := t.TempDir()
 	rootTarget := filepath.Join(tmp, "root-target")

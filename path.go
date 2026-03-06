@@ -28,8 +28,10 @@ func safeExtractRelativePath(name string) (string, error) {
 	if cleanName == "" || cleanName == "." || strings.ContainsRune(cleanName, '\\') {
 		return "", insecureExtractPathError(name)
 	}
-	if runtime.GOOS == "windows" && strings.ContainsRune(cleanName, ':') {
-		return "", insecureExtractPathError(name)
+	if runtime.GOOS == "windows" {
+		if strings.ContainsRune(cleanName, ':') || hasWindowsTrimmedPathComponent(cleanName) {
+			return "", insecureExtractPathError(name)
+		}
 	}
 	if !fs.ValidPath(cleanName) {
 		return "", insecureExtractPathError(name)
@@ -40,6 +42,18 @@ func safeExtractRelativePath(name string) (string, error) {
 		return "", insecureExtractPathError(name)
 	}
 	return localName, nil
+}
+
+func hasWindowsTrimmedPathComponent(name string) bool {
+	for _, part := range strings.Split(name, "/") {
+		if part == "" {
+			continue
+		}
+		if strings.HasSuffix(part, ".") || strings.HasSuffix(part, " ") {
+			return true
+		}
+	}
+	return false
 }
 
 // ensureNoSymlinkComponents rejects extraction paths where any existing

@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestSafeExtractPathRejectsWindowsDriveRelativeUNCAndADS(t *testing.T) {
+func TestSafeExtractPathRejectsWindowsDriveRelativeUNCADSAndTrimmedComponents(t *testing.T) {
 	root := `C:\extract-root`
 	tests := []string{
 		`C:relative.txt`,
@@ -17,6 +17,10 @@ func TestSafeExtractPathRejectsWindowsDriveRelativeUNCAndADS(t *testing.T) {
 		`\\server\share\file.txt`,
 		`file.txt:Zone.Identifier`,
 		`docs/readme.txt:stream`,
+		`file.txt.`,
+		`file.txt `,
+		`docs./readme.txt`,
+		`docs /readme.txt`,
 	}
 
 	for _, name := range tests {
