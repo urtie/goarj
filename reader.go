@@ -170,6 +170,9 @@ func NewReader(r io.ReaderAt, size int64) (*Reader, error) {
 // NewReaderWithOptions returns a new Reader reading from r, which is assumed
 // to have the given size in bytes, with configurable reader limits.
 func NewReaderWithOptions(r io.ReaderAt, size int64, opts ReaderOptions) (*Reader, error) {
+	if r == nil {
+		return nil, ErrFormat
+	}
 	if size < 0 {
 		return nil, ErrInvalidReaderSize
 	}

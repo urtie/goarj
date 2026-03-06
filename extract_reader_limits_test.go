@@ -197,6 +197,13 @@ func TestNewReaderWithOptionsMaxEntriesBoundaryInclusive(t *testing.T) {
 	}
 }
 
+func TestNewReaderWithOptionsRejectsNilReaderAt(t *testing.T) {
+	_, err := NewReaderWithOptions(nil, 2, ReaderOptions{})
+	if !errors.Is(err, ErrFormat) {
+		t.Fatalf("NewReaderWithOptions(nil, ...) error = %v, want %v", err, ErrFormat)
+	}
+}
+
 func TestNewReaderWithOptionsMaxExtendedHeaderCountLimit(t *testing.T) {
 	archive := writeSingleFileArchive(t, &FileHeader{
 		Name:                 "ext-count.bin",
