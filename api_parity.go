@@ -167,19 +167,13 @@ func ensureAncestorDirs(dirByName map[string]*FileHeader, name string, files map
 }
 
 func (r *Reader) fsIndexSnapshot() *readerFSIndex {
+	// Reader.File and nested FileHeader fields are exported, so callers can
+	// legitimately mutate them after a Reader is constructed. Rebuild the FS
+	// view from current state instead of caching a stale index.
 	r.stateMu.RLock()
-	idx := r.fsIndex
+	files := append([]*File(nil), r.File...)
 	r.stateMu.RUnlock()
-	if idx != nil {
-		return idx
-	}
-
-	r.stateMu.Lock()
-	defer r.stateMu.Unlock()
-	if r.fsIndex == nil {
-		r.fsIndex = buildReaderFSIndex(r.File)
-	}
-	return r.fsIndex
+	return buildReaderFSIndex(files)
 }
 
 func buildReaderFSIndex(files []*File) *readerFSIndex {
@@ -191,14 +185,10 @@ func buildReaderFSIndex(files []*File) *readerFSIndex {
 			continue
 		}
 		if f.isDir() {
-			if _, exists := explicitDirs[fullName]; !exists {
-				explicitDirs[fullName] = &f.FileHeader
-			}
+			explicitDirs[fullName] = &f.FileHeader
 			continue
 		}
-		if _, exists := fileByName[fullName]; !exists {
-			fileByName[fullName] = f
-		}
+		fileByName[fullName] = f
 	}
 
 	for name := range fileByName {

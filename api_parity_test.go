@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"math"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sync"
@@ -111,6 +112,135 @@ func TestReaderOpenInvalidPath(t *testing.T) {
 	}
 	if got, want := pe.Op, "open"; got != want {
 		t.Fatalf("PathError.Op = %q, want %q", got, want)
+	}
+}
+
+func TestReaderDuplicateFileNamesLastWinsAcrossFSAndExtract(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+
+	first, err := w.Create("dup.txt")
+	if err != nil {
+		t.Fatalf("Create first: %v", err)
+	}
+	if _, err := io.WriteString(first, "first"); err != nil {
+		t.Fatalf("Write first: %v", err)
+	}
+	second, err := w.Create("dup.txt")
+	if err != nil {
+		t.Fatalf("Create second: %v", err)
+	}
+	if _, err := io.WriteString(second, "second"); err != nil {
+		t.Fatalf("Write second: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close writer: %v", err)
+	}
+
+	r, err := NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+
+	f, err := r.Open("dup.txt")
+	if err != nil {
+		t.Fatalf("Open(dup.txt): %v", err)
+	}
+	data, err := io.ReadAll(f)
+	_ = f.Close()
+	if err != nil {
+		t.Fatalf("ReadAll(dup.txt): %v", err)
+	}
+	if got, want := string(data), "second"; got != want {
+		t.Fatalf("Open(dup.txt) payload = %q, want %q", got, want)
+	}
+
+	entries, err := fs.ReadDir(r, ".")
+	if err != nil {
+		t.Fatalf("ReadDir(.): %v", err)
+	}
+	if got, want := dirEntryNames(entries), []string{"dup.txt"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ReadDir(.) names = %v, want %v", got, want)
+	}
+
+	var walked []string
+	if err := fs.WalkDir(r, ".", func(name string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		walked = append(walked, name)
+		return nil
+	}); err != nil {
+		t.Fatalf("WalkDir: %v", err)
+	}
+	if got, want := walked, []string{".", "dup.txt"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("WalkDir paths = %v, want %v", got, want)
+	}
+
+	out := filepath.Join(t.TempDir(), "out")
+	if err := r.ExtractAll(out); err != nil {
+		t.Fatalf("ExtractAll: %v", err)
+	}
+	extracted, err := os.ReadFile(filepath.Join(out, "dup.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile extracted dup.txt: %v", err)
+	}
+	if got, want := string(extracted), "second"; got != want {
+		t.Fatalf("extracted dup.txt payload = %q, want %q", got, want)
+	}
+}
+
+func TestReaderFSIndexReflectsMutatedFileNames(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+
+	fw, err := w.Create("a.txt")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := io.WriteString(fw, "payload"); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close writer: %v", err)
+	}
+
+	r, err := NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+
+	f, err := r.Open("a.txt")
+	if err != nil {
+		t.Fatalf("Open(a.txt): %v", err)
+	}
+	_ = f.Close()
+
+	r.File[0].Name = "b.txt"
+
+	if _, err := r.Open("a.txt"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Open(a.txt) after rename error = %v, want %v", err, fs.ErrNotExist)
+	}
+
+	renamed, err := r.Open("b.txt")
+	if err != nil {
+		t.Fatalf("Open(b.txt): %v", err)
+	}
+	data, err := io.ReadAll(renamed)
+	_ = renamed.Close()
+	if err != nil {
+		t.Fatalf("ReadAll(b.txt): %v", err)
+	}
+	if got, want := string(data), "payload"; got != want {
+		t.Fatalf("Open(b.txt) payload = %q, want %q", got, want)
+	}
+
+	entries, err := fs.ReadDir(r, ".")
+	if err != nil {
+		t.Fatalf("ReadDir(.): %v", err)
+	}
+	if got, want := dirEntryNames(entries), []string{"b.txt"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ReadDir(.) names after rename = %v, want %v", got, want)
 	}
 }
 
