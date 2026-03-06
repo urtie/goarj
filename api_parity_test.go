@@ -1050,6 +1050,25 @@ func TestWriterAddFS(t *testing.T) {
 	}
 }
 
+func TestWriterAddFSSurfacesEntryFinalizeFailure(t *testing.T) {
+	fsys := fstest.MapFS{
+		"bad.txt": {Data: []byte("bad-payload"), Mode: 0o644},
+	}
+
+	ws := &patchFailureWriteSeeker{failWriteAfterPatchSeek: true}
+	w := NewWriter(ws)
+
+	if err := w.AddFS(fsys); !errors.Is(err, errInjectedPatchWrite) {
+		t.Fatalf("AddFS error = %v, want %v", err, errInjectedPatchWrite)
+	}
+	if _, err := w.Create("tail.txt"); !errors.Is(err, errInjectedPatchWrite) {
+		t.Fatalf("Create after failed AddFS error = %v, want wrapped %v", err, errInjectedPatchWrite)
+	}
+	if err := w.Close(); !errors.Is(err, errInjectedPatchWrite) {
+		t.Fatalf("Close after failed AddFS error = %v, want wrapped %v", err, errInjectedPatchWrite)
+	}
+}
+
 func TestWriterAddFSFailureIsStickyAndCloseFails(t *testing.T) {
 	openErr := errors.New("test: addfs open failure")
 	readErr := errors.New("test: addfs read failure")

@@ -552,6 +552,10 @@ func (w *Writer) AddFS(fsys fs.FS) error {
 			return err
 		}
 		if d.IsDir() {
+			if err := closeStagedWriterIfPossible(fw); err != nil {
+				w.latchFailure(err)
+				return err
+			}
 			return nil
 		}
 
@@ -567,6 +571,10 @@ func (w *Writer) AddFS(fsys fs.FS) error {
 			cause = abortStagedWriter(fw, cause)
 			w.latchFailure(cause)
 			return cause
+		}
+		if err := closeStagedWriterIfPossible(fw); err != nil {
+			w.latchFailure(err)
+			return err
 		}
 		return nil
 	})
