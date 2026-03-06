@@ -811,7 +811,7 @@ func TestMultiVolumeWriterCompressedStreamingVolumeTooSmall(t *testing.T) {
 	}
 }
 
-func TestMultiVolumeWriterCompressedStreamingIgnoresMethod14InputLimit(t *testing.T) {
+func TestMultiVolumeWriterCompressedStreamingHonorsMethod14InputLimit(t *testing.T) {
 	archivePath := filepath.Join(t.TempDir(), "method14-limit.arj")
 	mw, err := NewMultiVolumeWriter(archivePath, MultiVolumeWriterOptions{
 		VolumeSize: 32 * 1024,
@@ -828,27 +828,29 @@ func TestMultiVolumeWriterCompressedStreamingIgnoresMethod14InputLimit(t *testin
 	if err != nil {
 		t.Fatalf("CreateHeader: %v", err)
 	}
-	if n, err := iw.Write([]byte("0123456789")); err != nil || n != 10 {
-		t.Fatalf("Write = (%d, %v), want (10, nil)", n, err)
+	n, err := iw.Write([]byte("0123456789"))
+	if got, want := n, 0; got != want {
+		t.Fatalf("Write bytes = %d, want %d", got, want)
+	}
+	if !errors.Is(err, ErrBufferLimitExceeded) {
+		t.Fatalf("Write error = %v, want %v", err, ErrBufferLimitExceeded)
+	}
+	var limitErr *BufferLimitError
+	if !errors.As(err, &limitErr) {
+		t.Fatalf("Write error type = %T, want *BufferLimitError", err)
+	}
+	if got, want := limitErr.Scope, bufferScopeMethod14Input; got != want {
+		t.Fatalf("limit scope = %q, want %q", got, want)
+	}
+	if got, want := limitErr.Limit, uint64(8); got != want {
+		t.Fatalf("limit value = %d, want %d", got, want)
 	}
 
-	if err := iw.(io.Closer).Close(); err != nil {
-		t.Fatalf("Close error = %v, want nil", err)
+	if err := iw.(io.Closer).Close(); !errors.Is(err, ErrBufferLimitExceeded) {
+		t.Fatalf("Close error = %v, want %v", err, ErrBufferLimitExceeded)
 	}
 	if err := mw.Close(); err != nil {
-		t.Fatalf("Close writer: %v", err)
-	}
-
-	r, err := OpenMultiReader(archivePath)
-	if err != nil {
-		t.Fatalf("OpenMultiReader: %v", err)
-	}
-	defer r.Close()
-	if got, want := len(r.File), 1; got != want {
-		t.Fatalf("file count = %d, want %d", got, want)
-	}
-	if got := mustReadFileEntry(t, r.File[0]); string(got) != "0123456789" {
-		t.Fatalf("payload = %q, want %q", got, "0123456789")
+		t.Fatalf("Close writer error = %v, want nil", err)
 	}
 }
 

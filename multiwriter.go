@@ -389,7 +389,7 @@ func (w *MultiVolumeWriter) CreateHeader(fh *FileHeader) (io.Writer, error) {
 			w:                  w,
 			h:                  &h,
 			compressor:         comp,
-			method14InputLimit: maxARJFileSize,
+			method14InputLimit: limits.MaxMethod14InputBufferSize,
 			chunkSize:          multiVolumeCompressedStreamChunkSize,
 		}
 		w.last = cw
