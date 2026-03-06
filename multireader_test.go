@@ -116,6 +116,33 @@ func TestVolumePathsContinuationThreeDigitWidth(t *testing.T) {
 	}
 }
 
+func TestVolumePathsContinuationFourDigitWidth(t *testing.T) {
+	tmp := t.TempDir()
+	base := filepath.Join(tmp, "wide")
+
+	mustWriteFile(t, base+".arj", []byte("x"))
+	want := make([]string, 0, 1002)
+	want = append(want, base+".arj")
+	for i := 1; i <= 1001; i++ {
+		path := fmt.Sprintf("%s.a%02d", base, i)
+		if i == 1000 {
+			path = base + ".A1000"
+		}
+		mustWriteFile(t, path, []byte("x"))
+		want = append(want, path)
+	}
+
+	for _, openPath := range []string{base + ".arj", base + ".a999", base + ".A1000", base + ".a1001"} {
+		got, err := VolumePathsWithOptions(openPath, MultiVolumeOptions{MaxVolumes: len(want)})
+		if err != nil {
+			t.Fatalf("VolumePaths(%s): %v", openPath, err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("VolumePaths(%s) = %v, want %v", openPath, got, want)
+		}
+	}
+}
+
 func TestVolumePathsFromA100PrefersCanonicalTwoDigitFamilyWhenAmbiguous(t *testing.T) {
 	tmp := t.TempDir()
 	base := filepath.Join(tmp, "set")

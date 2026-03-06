@@ -280,7 +280,7 @@ func resolvePartVolumePath(stem string, part int, preferredWidth int) (string, i
 		return "", 0, false, nil
 	}
 
-	for _, width := range continuationWidths(preferredWidth) {
+	for _, width := range continuationWidths(part, preferredWidth) {
 		index := fmt.Sprintf("%0*d", width, part)
 		candidates := []string{
 			stem + ".a" + index,
@@ -326,8 +326,8 @@ func parseVolumePartExt(ext string) (part int, width int, ok bool) {
 	return n, width, true
 }
 
-func continuationWidths(preferred int) []int {
-	widths := make([]int, 0, 3)
+func continuationWidths(part, preferred int) []int {
+	widths := make([]int, 0, 4)
 	appendWidth := func(width int) {
 		if width < 2 {
 			return
@@ -343,6 +343,7 @@ func continuationWidths(preferred int) []int {
 	appendWidth(preferred)
 	appendWidth(2)
 	appendWidth(3)
+	appendWidth(len(strconv.Itoa(part)))
 	return widths
 }
 
