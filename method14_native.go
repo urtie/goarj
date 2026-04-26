@@ -2,6 +2,7 @@ package arj
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"sync"
@@ -39,6 +40,11 @@ var (
 			return new(method4FastStreamDecoder)
 		},
 	}
+	method14BufferedReaderPool = sync.Pool{
+		New: func() any {
+			return bufio.NewReaderSize(bytes.NewReader(nil), method14DecompressorMaxBufferSize)
+		},
+	}
 )
 
 var method14LowMask16 = [17]uint64{
@@ -71,10 +77,11 @@ type method14ErrorReadCloser struct {
 }
 
 type method14StreamingReadCloser struct {
-	method uint16
-	r      io.Reader
-	err    error
-	closed bool
+	method  uint16
+	r       io.Reader
+	release func()
+	err     error
+	closed  bool
 }
 
 type method14BitReader interface {
@@ -230,32 +237,35 @@ func decompressorMethod14(method uint16) Decompressor {
 
 		// Decode uses bit-level reads, so keep compressed input buffered to avoid
 		// tiny syscall-heavy reads from the underlying archive file.
-		br := newARJBitStreamReader(bufio.NewReaderSize(ctx.Reader, method14DecompressorBufferSize(ctx.compressedSize)), ctx.compressedSize)
+		buffered, releaseBuffered := acquireMethod14BufferedReader(ctx.Reader)
+		br := newARJBitStreamReader(buffered, ctx.compressedSize)
 		switch method {
 		case Method1, Method2, Method3:
 			return &method14StreamingReadCloser{
-				method: method,
-				r:      newMethod123FastStreamDecoder(br, ctx.uncompressedSize),
+				method:  method,
+				r:       newMethod123FastStreamDecoder(br, ctx.uncompressedSize),
+				release: releaseBuffered,
 			}
 		case Method4:
 			return &method14StreamingReadCloser{
-				method: method,
-				r:      newMethod4FastStreamDecoder(br, ctx.uncompressedSize),
+				method:  method,
+				r:       newMethod4FastStreamDecoder(br, ctx.uncompressedSize),
+				release: releaseBuffered,
 			}
 		default:
+			releaseBuffered()
 			return &method14ErrorReadCloser{err: ErrAlgorithm}
 		}
 	}
 }
 
-func method14DecompressorBufferSize(compressedSize int64) int {
-	if compressedSize <= 0 {
-		return 1
+func acquireMethod14BufferedReader(r io.Reader) (*bufio.Reader, func()) {
+	br := method14BufferedReaderPool.Get().(*bufio.Reader)
+	br.Reset(r)
+	return br, func() {
+		br.Reset(bytes.NewReader(nil))
+		method14BufferedReaderPool.Put(br)
 	}
-	if compressedSize > method14DecompressorMaxBufferSize {
-		return method14DecompressorMaxBufferSize
-	}
-	return int(compressedSize)
 }
 
 func (w *method14Compressor) Write(p []byte) (int, error) {
@@ -414,6 +424,10 @@ func (r *method14StreamingReadCloser) Close() error {
 	}
 	r.closed = true
 	defer func() {
+		if r.release != nil {
+			r.release()
+			r.release = nil
+		}
 		r.r = nil
 	}()
 	if closer, ok := r.r.(io.Closer); ok {

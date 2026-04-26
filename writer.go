@@ -413,9 +413,8 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.Writer, error) {
 	}
 
 	fw := &fileWriter{
-		w:   w,
-		h:   &h,
-		crc: crc32.NewIEEE(),
+		w: w,
+		h: &h,
 	}
 	limits := w.writeBufferLimits()
 	fw.entryBufferLimit = limits.MaxCompressedEntryBufferSize
@@ -634,14 +633,9 @@ type fileWriter struct {
 	plainN             uint64
 	entryBufferLimit   uint64
 	method14InputLimit uint64
-	crc                hash32
+	crc                uint32
 	writeErr           error
 	closed             bool
-}
-
-type hash32 interface {
-	Write(p []byte) (int, error)
-	Sum32() uint32
 }
 
 func (w *fileWriter) latchWriteErr(err error) {
@@ -694,7 +688,7 @@ func (w *fileWriter) Write(p []byte) (int, error) {
 
 	n, err := w.cw.Write(chunk)
 	if n > 0 {
-		_, _ = w.crc.Write(chunk[:n])
+		w.crc = crc32.Update(w.crc, crc32.IEEETable, chunk[:n])
 		w.plainN += uint64(n)
 	}
 	if err != nil {
@@ -769,7 +763,7 @@ func (w *fileWriter) close() (err error) {
 	if w.h.UncompressedSize64 > maxARJFileSize || w.h.CompressedSize64 > maxARJFileSize {
 		return errFileTooLarge
 	}
-	w.h.CRC32 = w.crc.Sum32()
+	w.h.CRC32 = w.crc
 	w.h.modifiedDOS = timeToDosDateTime(w.h.Modified)
 	syncFileHeaderExtMetadata(w.h)
 

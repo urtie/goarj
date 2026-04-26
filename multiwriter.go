@@ -782,7 +782,7 @@ type multiVolumeStoreSegment struct {
 	header       FileHeader
 	headerOffset int64
 	plainN       uint64
-	crc          hash32
+	crc          uint32
 }
 
 type multiVolumeCompressedSegment struct {
@@ -1172,7 +1172,7 @@ func (w *multiVolumeStoreFileWriter) Write(p []byte) (int, error) {
 
 		n, err := w.w.current.cw.Write(p[:chunkN])
 		if n > 0 {
-			_, _ = w.segment.crc.Write(p[:n])
+			w.segment.crc = crc32.Update(w.segment.crc, crc32.IEEETable, p[:n])
 			w.segment.plainN += uint64(n)
 			w.plainN += uint64(n)
 			total += n
@@ -1293,7 +1293,6 @@ func (w *multiVolumeStoreFileWriter) openSegment(needPayload bool) error {
 		w.segment = &multiVolumeStoreSegment{
 			header:       h,
 			headerOffset: headerOffset,
-			crc:          crc32.NewIEEE(),
 		}
 		return nil
 	}
@@ -1313,7 +1312,7 @@ func (w *multiVolumeStoreFileWriter) finishSegment(hasMore bool) error {
 	if h.UncompressedSize64 > maxARJFileSize || h.CompressedSize64 > maxARJFileSize {
 		return errFileTooLarge
 	}
-	h.CRC32 = w.segment.crc.Sum32()
+	h.CRC32 = w.segment.crc
 	if w.segment.plainN == 0 {
 		h.CRC32 = crc32.ChecksumIEEE(nil)
 	}

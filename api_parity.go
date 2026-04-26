@@ -341,16 +341,20 @@ func (f *File) OpenRaw() (io.Reader, error) {
 		return nil, err
 	}
 
-	segments := f.segmentList()
-	readers := make([]io.Reader, 0, len(segments))
-	for _, segment := range segments {
+	if len(f.segments) == 0 {
+		segment := f.singleSegment()
+		if segment.dataOffset < 0 || segment.compressedSize > uint64(maxInt64) {
+			return nil, ErrFormat
+		}
+		return io.NewSectionReader(f.arj.r, segment.dataOffset, int64(segment.compressedSize)), nil
+	}
+
+	readers := make([]io.Reader, 0, len(f.segments))
+	for _, segment := range f.segments {
 		if segment.dataOffset < 0 || segment.compressedSize > uint64(maxInt64) {
 			return nil, ErrFormat
 		}
 		readers = append(readers, io.NewSectionReader(f.arj.r, segment.dataOffset, int64(segment.compressedSize)))
-	}
-	if len(readers) == 1 {
-		return readers[0], nil
 	}
 	return io.MultiReader(readers...), nil
 }
@@ -435,15 +439,10 @@ func (w *Writer) CreateRaw(fh *FileHeader) (io.Writer, error) {
 		return nil, err
 	}
 
-	var sum hash32
-	if h.Method == Store {
-		sum = crc32.NewIEEE()
-	}
 	fw := &rawFileWriter{
 		owner: w,
 		h:     &h,
 		w:     w.cw,
-		crc:   sum,
 	}
 	w.last = fw
 	return fw, nil
@@ -504,7 +503,7 @@ type rawFileWriter struct {
 	h        *FileHeader
 	w        io.Writer
 	rawN     uint64
-	crc      hash32
+	crc      uint32
 	writeErr error
 	closed   bool
 }
@@ -550,8 +549,8 @@ func (w *rawFileWriter) Write(p []byte) (int, error) {
 
 	n, err := w.w.Write(chunk)
 	if n > 0 {
-		if w.h.Method == Store && w.crc != nil {
-			_, _ = w.crc.Write(chunk[:n])
+		if w.h.Method == Store {
+			w.crc = crc32.Update(w.crc, crc32.IEEETable, chunk[:n])
 		}
 		w.rawN += uint64(n)
 	}
@@ -619,10 +618,7 @@ func (w *rawFileWriter) close() (err error) {
 		if w.rawN != w.h.UncompressedSize64 {
 			return fmt.Errorf("%w: payload=%d header=%d", errRawStoreSizeMismatch, w.rawN, w.h.UncompressedSize64)
 		}
-		if w.crc == nil {
-			return ErrFormat
-		}
-		if got := w.crc.Sum32(); got != w.h.CRC32 {
+		if got := w.crc; got != w.h.CRC32 {
 			return fmt.Errorf("%w: payload crc=%08x header=%08x", ErrChecksum, got, w.h.CRC32)
 		}
 	}

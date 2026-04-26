@@ -439,13 +439,12 @@ func (f *File) openWithPassword(password []byte) (io.ReadCloser, error) {
 	}
 
 	passwordCopy := append([]byte(nil), password...)
-	segmentList := f.segmentList()
-	if len(segmentList) == 1 {
-		rc, err := f.openSegment(segmentList[0], passwordCopy)
+	if len(f.segments) == 0 {
+		rc, err := f.openSegment(f.singleSegment(), passwordCopy)
 		clearBytes(passwordCopy)
 		return rc, err
 	}
-	segments := append([]fileSegment(nil), segmentList...)
+	segments := append([]fileSegment(nil), f.segments...)
 
 	rc := &multiSegmentReadCloser{
 		segments: segments,
@@ -491,7 +490,11 @@ func (f *File) segmentList() []fileSegment {
 	if len(f.segments) != 0 {
 		return f.segments
 	}
-	return []fileSegment{{
+	return []fileSegment{f.singleSegment()}
+}
+
+func (f *File) singleSegment() fileSegment {
+	return fileSegment{
 		dataOffset:       f.dataOffset,
 		method:           f.Method,
 		flags:            f.Flags,
@@ -500,7 +503,7 @@ func (f *File) segmentList() []fileSegment {
 		compressedSize:   f.CompressedSize64,
 		uncompressedSize: f.UncompressedSize64,
 		crc32:            f.CRC32,
-	}}
+	}
 }
 
 func (f *File) openSegment(segment fileSegment, password []byte) (io.ReadCloser, error) {
@@ -600,6 +603,12 @@ func (r *checksumReader) Read(p []byte) (int, error) {
 }
 
 func (r *checksumReader) Close() error {
+	if r == nil {
+		return nil
+	}
+	if r.rc == nil {
+		return nil
+	}
 	return r.rc.Close()
 }
 
