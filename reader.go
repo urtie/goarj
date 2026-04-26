@@ -636,6 +636,15 @@ func (r *checksumReader) Close() error {
 	return errors.Join(verifyErr, closeErr)
 }
 
+func (r *checksumReader) abort() error {
+	if r == nil || r.rc == nil {
+		return nil
+	}
+	abortStreamReadCloser(r.rc)
+	r.rc = nil
+	return nil
+}
+
 func (r *checksumReader) drainAndVerify() error {
 	var buf [32 * 1024]byte
 	for r.err == nil && !r.verified {

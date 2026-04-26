@@ -138,6 +138,126 @@ func TestStreamReaderNextSequential(t *testing.T) {
 	}
 }
 
+func TestStreamReaderClearPasswordScrubsPassword(t *testing.T) {
+	archive := buildStreamArchive(t, []streamTestEntry{
+		{
+			header:  FileHeader{Name: "scrub.txt", Method: Store},
+			payload: []byte("payload"),
+		},
+	})
+	sr, err := NewStreamReader(bytes.NewReader(archive))
+	if err != nil {
+		t.Fatalf("NewStreamReader: %v", err)
+	}
+	sr.SetPassword("top-secret")
+	if len(sr.password) == 0 {
+		t.Fatal("password unexpectedly empty after SetPassword")
+	}
+	sensitive := sr.password[:len(sr.password):len(sr.password)]
+
+	sr.ClearPassword()
+	assertStreamReaderPasswordScrubbed(t, sr, sensitive)
+
+	_, rc, err := sr.Next()
+	if err != nil {
+		t.Fatalf("Next after ClearPassword: %v", err)
+	}
+	if got, err := io.ReadAll(rc); err != nil || string(got) != "payload" {
+		t.Fatalf("ReadAll after ClearPassword = (%q, %v), want (%q, nil)", got, err, "payload")
+	}
+}
+
+func TestStreamReaderCloseScrubsPassword(t *testing.T) {
+	archive := buildStreamArchive(t, []streamTestEntry{
+		{
+			header:  FileHeader{Name: "scrub.txt", Method: Store},
+			payload: []byte("payload"),
+		},
+	})
+	sr, err := NewStreamReader(bytes.NewReader(archive))
+	if err != nil {
+		t.Fatalf("NewStreamReader: %v", err)
+	}
+	sr.SetPassword("top-secret")
+	if len(sr.password) == 0 {
+		t.Fatal("password unexpectedly empty after SetPassword")
+	}
+	sensitive := sr.password[:len(sr.password):len(sr.password)]
+
+	if _, _, err := sr.Next(); err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if sr.current == nil {
+		t.Fatal("current entry unexpectedly nil before Close")
+	}
+	if err := sr.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	assertStreamReaderPasswordScrubbed(t, sr, sensitive)
+	if sr.current != nil {
+		t.Fatalf("current entry = %v, want nil after Close", sr.current)
+	}
+	if _, _, err := sr.Next(); !errors.Is(err, io.EOF) {
+		t.Fatalf("Next after Close error = %v, want %v", err, io.EOF)
+	}
+}
+
+func TestStreamReaderCloseAbortsOpenEntryWithoutDraining(t *testing.T) {
+	archive := buildStreamArchive(t, []streamTestEntry{
+		{
+			header:  FileHeader{Name: "corrupt-tail.txt", Method: Store},
+			payload: []byte("payload"),
+		},
+	})
+	dataOff := firstStreamLocalDataOffset(t, archive)
+	corrupt := append([]byte(nil), archive...)
+	corrupt[dataOff+1] ^= 0xff
+
+	sr, err := NewStreamReader(bytes.NewReader(corrupt))
+	if err != nil {
+		t.Fatalf("NewStreamReader: %v", err)
+	}
+	_, rc, err := sr.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	buf := make([]byte, 1)
+	if n, err := rc.Read(buf); n != 1 || err != nil {
+		t.Fatalf("Read first byte = (%d, %v), want (1, nil)", n, err)
+	}
+	if err := sr.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func firstStreamLocalDataOffset(t *testing.T, archive []byte) int {
+	t.Helper()
+
+	size := int64(len(archive))
+	r := bytes.NewReader(archive)
+	_, _, localOff, err := readHeaderBlock(r, size, 0)
+	if err != nil {
+		t.Fatalf("readHeaderBlock(main): %v", err)
+	}
+	_, _, localDataOff, err := readHeaderBlock(r, size, localOff)
+	if err != nil {
+		t.Fatalf("readHeaderBlock(local): %v", err)
+	}
+	return int(localDataOff)
+}
+
+func assertStreamReaderPasswordScrubbed(t *testing.T, sr *StreamReader, sensitive []byte) {
+	t.Helper()
+	if sr.password != nil {
+		t.Fatalf("password slice = %v, want nil", sr.password)
+	}
+	for i, b := range sensitive {
+		if b != 0 {
+			t.Fatalf("scrubbed byte %d = %d, want 0", i, b)
+		}
+	}
+}
+
 func TestStreamReaderNextClosesPreviousUnreadEntry(t *testing.T) {
 	archive := buildStreamArchive(t, []streamTestEntry{
 		{

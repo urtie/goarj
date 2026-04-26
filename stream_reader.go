@@ -118,6 +118,16 @@ func (r *StreamReader) SetPassword(password string) {
 	r.password = append(r.password[:0], password...)
 }
 
+// ClearPassword clears the configured default password.
+func (r *StreamReader) ClearPassword() {
+	if r == nil {
+		return
+	}
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
+	r.clearPasswordLocked()
+}
+
 // SetMethod14DecodeLimits overrides native method 1-4 decode limits.
 // Any zero field keeps the corresponding package default.
 func (r *StreamReader) SetMethod14DecodeLimits(limits Method14DecodeLimits) {
@@ -169,6 +179,30 @@ func (r *StreamReader) decompressor(method uint16) Decompressor {
 		}
 	}
 	return decompressor(method)
+}
+
+func (r *StreamReader) clearPasswordLocked() {
+	clearBytes(r.password)
+	r.password = nil
+}
+
+// Close releases stream reader state and clears the configured password. It
+// does not close the underlying io.Reader passed to NewStreamReader.
+func (r *StreamReader) Close() error {
+	if r == nil {
+		return nil
+	}
+
+	var err error
+	if r.current != nil {
+		err = r.current.abort()
+	}
+
+	r.stateMu.Lock()
+	r.clearPasswordLocked()
+	r.done = true
+	r.stateMu.Unlock()
+	return err
 }
 
 // Next advances to the next file in the stream and returns its header and
@@ -521,9 +555,8 @@ func (r *streamEntryReadCloser) abort() error {
 		return nil
 	}
 
-	var closeErr error
 	if r.rc != nil {
-		closeErr = r.rc.Close()
+		abortStreamReadCloser(r.rc)
 		r.rc = nil
 	}
 	if r.raw != nil {
@@ -533,5 +566,5 @@ func (r *streamEntryReadCloser) abort() error {
 	if r.owner != nil && r.owner.current == r {
 		r.owner.current = nil
 	}
-	return closeErr
+	return nil
 }
