@@ -180,6 +180,19 @@ func TestVolumePathsRequiresRequestedContinuationPathToExist(t *testing.T) {
 	}
 }
 
+func TestVolumePathsContinuationInputRequiresContiguousPrefix(t *testing.T) {
+	tmp := t.TempDir()
+	base := filepath.Join(tmp, "set")
+
+	mustWriteFile(t, base+".arj", []byte("x"))
+	mustWriteFile(t, base+".a02", []byte("x"))
+
+	_, err := VolumePaths(base + ".a02")
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("VolumePaths(.a02) error = %v, want %v", err, os.ErrNotExist)
+	}
+}
+
 func TestVolumePathsContinuationPathCaseInsensitiveExistence(t *testing.T) {
 	tmp := t.TempDir()
 	base := filepath.Join(tmp, "set")

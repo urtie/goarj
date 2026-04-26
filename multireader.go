@@ -186,7 +186,7 @@ func volumePaths(name string, maxVolumes int) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		return collectVolumePaths(stem, first, maxVolumes, width)
+		return collectVolumePathsThrough(stem, first, maxVolumes, width, part)
 	default:
 		return []string{name}, nil
 	}
@@ -210,6 +210,10 @@ func resolveContinuationInputPath(name, stem string, part, width int) (string, e
 }
 
 func collectVolumePaths(stem, first string, maxVolumes, preferredWidth int) ([]string, error) {
+	return collectVolumePathsThrough(stem, first, maxVolumes, preferredWidth, 0)
+}
+
+func collectVolumePathsThrough(stem, first string, maxVolumes, preferredWidth, requiredPart int) ([]string, error) {
 	paths := []string{first}
 	for part := 1; ; part++ {
 		path, width, found, err := resolvePartVolumePath(stem, part, preferredWidth)
@@ -217,6 +221,9 @@ func collectVolumePaths(stem, first string, maxVolumes, preferredWidth int) ([]s
 			return nil, err
 		}
 		if !found {
+			if part <= requiredPart {
+				return nil, missingVolumePartError(stem, part, preferredWidth)
+			}
 			break
 		}
 		if len(paths) >= maxVolumes {
@@ -228,6 +235,19 @@ func collectVolumePaths(stem, first string, maxVolumes, preferredWidth int) ([]s
 		}
 	}
 	return paths, nil
+}
+
+func missingVolumePartError(stem string, part, preferredWidth int) error {
+	widths := continuationWidths(part, preferredWidth)
+	width := 2
+	if len(widths) != 0 {
+		width = widths[0]
+	}
+	return &os.PathError{
+		Op:   "open",
+		Path: fmt.Sprintf("%s.a%0*d", stem, width, part),
+		Err:  os.ErrNotExist,
+	}
 }
 
 func resolveMaxVolumeCount(maxVolumes int) (int, error) {
@@ -513,9 +533,9 @@ func validateVolumeMainHeaderCoherence(volumes []*Reader) error {
 		if sawVolumeFlagClear && hasVolumeFlag {
 			return inconsistentVolumeMainHeaderError("Flags", i)
 		}
-			if !hasVolumeFlag {
-				sawVolumeFlagClear = true
-			}
+		if !hasVolumeFlag {
+			sawVolumeFlagClear = true
+		}
 
 		switch {
 		case h.FirstHeaderSize != base.FirstHeaderSize:
@@ -550,8 +570,8 @@ func validateVolumeMainHeaderCoherence(volumes []*Reader) error {
 			return inconsistentVolumeMainHeaderError("ProtectionFlags", i)
 		case h.ProtectionReserved != base.ProtectionReserved:
 			return inconsistentVolumeMainHeaderError("ProtectionReserved", i)
-			}
 		}
+	}
 	return nil
 }
 
