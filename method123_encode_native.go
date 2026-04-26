@@ -223,12 +223,16 @@ func (e *method123BitEncoder) writeBlock(tokens []method123Token) {
 		}
 	}
 
-	cTree := method123BuildHuffman(cFreq[:])
+	var cLengths [methodNC]uint8
+	var cCodes [methodNC]uint16
+	cTree := method123BuildHuffman(cFreq[:], cLengths[:], cCodes[:])
 
 	e.bw.putBits(methodCodeBit, uint16(len(tokens)))
 	if cTree.root >= methodNC {
 		tFreq := method123CountTFreq(cTree.lengths)
-		tTree := method123BuildHuffman(tFreq[:])
+		var tLengths [methodNT]uint8
+		var tCodes [methodNT]uint16
+		tTree := method123BuildHuffman(tFreq[:], tLengths[:], tCodes[:])
 		if tTree.root >= methodNT {
 			e.writePtLen(tTree.lengths, methodNT, methodTBIT, 3)
 		} else {
@@ -243,7 +247,9 @@ func (e *method123BitEncoder) writeBlock(tokens []method123Token) {
 		e.bw.putBits(methodCBIT, uint16(cTree.root))
 	}
 
-	pTree := method123BuildHuffman(pFreq[:])
+	var pLengths [methodNP]uint8
+	var pCodes [methodNP]uint16
+	pTree := method123BuildHuffman(pFreq[:], pLengths[:], pCodes[:])
 	if pTree.root >= methodNP {
 		e.writePtLen(pTree.lengths, methodNP, methodPBIT, -1)
 	} else {
@@ -329,10 +335,20 @@ func (e *method123BitEncoder) writeCLen(cLen, ptLen []uint8, ptCode []uint16) {
 	}
 }
 
-func method123BuildHuffman(freq []uint32) method123HuffmanTree {
+func method123BuildHuffman(freq []uint32, lengths []uint8, codes []uint16) method123HuffmanTree {
 	n := len(freq)
-	lengths := make([]uint8, n)
-	codes := make([]uint16, n)
+	if cap(lengths) < n {
+		lengths = make([]uint8, n)
+	} else {
+		lengths = lengths[:n]
+		clear(lengths)
+	}
+	if cap(codes) < n {
+		codes = make([]uint16, n)
+	} else {
+		codes = codes[:n]
+		clear(codes)
+	}
 
 	scratch := method123AcquireHuffmanScratch(n)
 	defer method123ReleaseHuffmanScratch(scratch)
