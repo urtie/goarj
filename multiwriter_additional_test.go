@@ -224,10 +224,10 @@ func TestMultiVolumeWriterAddFS(t *testing.T) {
 	for _, f := range r.File {
 		methodByName[f.Name] = f.Method
 	}
-	if got, want := methodByName["root.txt"], uint16(Method1); got != want {
+	if got, want := methodByName["root.txt"], uint16(Method4); got != want {
 		t.Fatalf("root.txt method = %d, want %d", got, want)
 	}
-	if got, want := methodByName["sub/leaf.txt"], uint16(Method1); got != want {
+	if got, want := methodByName["sub/leaf.txt"], uint16(Method4); got != want {
 		t.Fatalf("sub/leaf.txt method = %d, want %d", got, want)
 	}
 	if got, want := methodByName["sub/"], uint16(Store); got != want {

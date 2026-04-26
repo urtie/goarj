@@ -299,9 +299,9 @@ func (w *MultiVolumeWriter) compressor(method uint16) Compressor {
 	return compressor(method)
 }
 
-// Create adds a file to the archive set using Method1 compression.
+// Create adds a file to the archive set using Method4 compression.
 func (w *MultiVolumeWriter) Create(name string) (io.Writer, error) {
-	return w.CreateHeader(&FileHeader{Name: name, Method: Method1})
+	return w.CreateHeader(&FileHeader{Name: name, Method: Method4})
 }
 
 // CreateHeader adds a file to the archive set using the provided FileHeader.
@@ -579,7 +579,7 @@ func (w *MultiVolumeWriter) AddFS(fsys fs.FS) error {
 		if d.IsDir() {
 			h.Name += "/"
 		} else {
-			h.Method = Method1
+			h.Method = Method4
 		}
 
 		fw, err := w.CreateHeader(h)

@@ -326,11 +326,11 @@ func (w *Writer) Close() error {
 }
 
 // Create adds a file to the archive using the provided name.
-// The file is written using Method1 compression.
+// The file is written using Method4 compression.
 func (w *Writer) Create(name string) (io.Writer, error) {
 	header := &FileHeader{
 		Name:   name,
-		Method: Method1,
+		Method: Method4,
 	}
 	return w.CreateHeader(header)
 }

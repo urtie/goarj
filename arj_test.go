@@ -61,7 +61,7 @@ func TestRoundTrip(t *testing.T) {
 	if got, want := len(r.File), 3; got != want {
 		t.Fatalf("file count = %d, want %d", got, want)
 	}
-	if got, want := r.File[0].Method, uint16(Method1); got != want {
+	if got, want := r.File[0].Method, uint16(Method4); got != want {
 		t.Fatalf("a.txt method = %d, want %d", got, want)
 	}
 
@@ -141,7 +141,7 @@ func TestOpenReader(t *testing.T) {
 	}
 }
 
-func TestCreateUsesMethod1CompressionByDefault(t *testing.T) {
+func TestCreateUsesMethod4CompressionByDefault(t *testing.T) {
 	payload := bytes.Repeat([]byte("compress-default-path-"), 512)
 
 	var buf bytes.Buffer
@@ -166,7 +166,7 @@ func TestCreateUsesMethod1CompressionByDefault(t *testing.T) {
 	}
 
 	f := r.File[0]
-	if got, want := f.Method, uint16(Method1); got != want {
+	if got, want := f.Method, uint16(Method4); got != want {
 		t.Fatalf("method = %d, want %d", got, want)
 	}
 	if f.CompressedSize64 >= f.UncompressedSize64 {

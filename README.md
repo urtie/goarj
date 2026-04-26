@@ -36,6 +36,10 @@ go run ./cmd/goarj extract backup.arj ./out
 
 ## Performance notes
 
+High-level `Create` and `AddFS` calls use ARJ `Method4` compression by default,
+which is usually faster than Method1 in the native Go encoder. Use
+`CreateHeader` when you need to choose a specific method.
+
 ARJ local headers store entry sizes before the entry payload. When `NewWriter`
 receives a plain `io.Writer`, goarj must buffer each compressed entry until the
 size and CRC are known. Passing an `io.WriteSeeker` such as `*os.File` lets the
