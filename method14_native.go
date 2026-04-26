@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"sync"
 )
 
 const (
@@ -23,7 +24,21 @@ const (
 	methodCTable   = 4096
 	methodPTable   = 256
 
-	method14CompressorChunkSize = 64 << 10
+	method14CompressorChunkSize       = 64 << 10
+	method14DecompressorMaxBufferSize = 64 << 10
+)
+
+var (
+	method123FastStreamDecoderPool = sync.Pool{
+		New: func() any {
+			return new(method123FastStreamDecoder)
+		},
+	}
+	method4FastStreamDecoderPool = sync.Pool{
+		New: func() any {
+			return new(method4FastStreamDecoder)
+		},
+	}
 )
 
 var method14LowMask16 = [17]uint64{
@@ -60,6 +75,7 @@ type method14StreamingReadCloser struct {
 	method uint16
 	r      io.Reader
 	err    error
+	closed bool
 }
 
 type method14BitReader interface {
@@ -215,7 +231,7 @@ func decompressorMethod14(method uint16) Decompressor {
 
 		// Decode uses bit-level reads, so keep compressed input buffered to avoid
 		// tiny syscall-heavy reads from the underlying archive file.
-		br := newARJBitStreamReader(bufio.NewReaderSize(ctx.Reader, 64<<10), ctx.compressedSize)
+		br := newARJBitStreamReader(bufio.NewReaderSize(ctx.Reader, method14DecompressorBufferSize(ctx.compressedSize)), ctx.compressedSize)
 		switch method {
 		case Method1, Method2, Method3:
 			return &method14StreamingReadCloser{
@@ -231,6 +247,16 @@ func decompressorMethod14(method uint16) Decompressor {
 			return &method14ErrorReadCloser{err: ErrAlgorithm}
 		}
 	}
+}
+
+func method14DecompressorBufferSize(compressedSize int64) int {
+	if compressedSize <= 0 {
+		return 1
+	}
+	if compressedSize > method14DecompressorMaxBufferSize {
+		return method14DecompressorMaxBufferSize
+	}
+	return int(compressedSize)
 }
 
 func (w *method14Compressor) Write(p []byte) (int, error) {
@@ -371,6 +397,9 @@ func (r *method14ErrorReadCloser) Close() error {
 }
 
 func (r *method14StreamingReadCloser) Read(p []byte) (int, error) {
+	if r.closed {
+		return 0, io.ErrClosedPipe
+	}
 	if r.err != nil {
 		return 0, r.err
 	}
@@ -383,6 +412,13 @@ func (r *method14StreamingReadCloser) Read(p []byte) (int, error) {
 }
 
 func (r *method14StreamingReadCloser) Close() error {
+	if r == nil || r.closed {
+		return nil
+	}
+	r.closed = true
+	defer func() {
+		r.r = nil
+	}()
 	if closer, ok := r.r.(io.Closer); ok {
 		return closer.Close()
 	}
@@ -769,11 +805,19 @@ func newMethod123StreamDecoder(br method14BitReader, origSize uint64) *method123
 }
 
 func newMethod123FastStreamDecoder(br *arjBitStreamReader, origSize uint64) *method123FastStreamDecoder {
-	d := &method123FastStreamDecoder{
-		remaining: origSize,
-	}
+	d := method123FastStreamDecoderPool.Get().(*method123FastStreamDecoder)
 	d.dec.br = br
+	d.remaining = origSize
 	return d
+}
+
+func (d *method123FastStreamDecoder) Close() error {
+	if d == nil {
+		return nil
+	}
+	*d = method123FastStreamDecoder{}
+	method123FastStreamDecoderPool.Put(d)
+	return nil
 }
 
 func (d *method123StreamDecoder) Read(p []byte) (int, error) {
@@ -988,10 +1032,19 @@ func newMethod4StreamDecoder(br method14BitReader, origSize uint64) *method4Stre
 }
 
 func newMethod4FastStreamDecoder(br *arjBitStreamReader, origSize uint64) *method4FastStreamDecoder {
-	return &method4FastStreamDecoder{
-		br:        br,
-		remaining: origSize,
+	d := method4FastStreamDecoderPool.Get().(*method4FastStreamDecoder)
+	d.br = br
+	d.remaining = origSize
+	return d
+}
+
+func (d *method4FastStreamDecoder) Close() error {
+	if d == nil {
+		return nil
 	}
+	*d = method4FastStreamDecoder{}
+	method4FastStreamDecoderPool.Put(d)
+	return nil
 }
 
 func (d *method4StreamDecoder) Read(p []byte) (int, error) {
