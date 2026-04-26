@@ -1161,6 +1161,53 @@ func TestMultiVolumeWriterNativeMaxCompressedChunkStopsRefiningNearBest(t *testi
 	}
 }
 
+func TestMultiVolumeWriterNativeMaxCompressedChunkDelaysTightFullProbe(t *testing.T) {
+	const (
+		plainLen = 1 << 20
+		maxComp  = 64 << 10
+	)
+
+	plain := newEntryBuffer(uint64(plainLen), bufferScopeMultiEntryPlain)
+	defer plain.Close()
+	if _, err := plain.Write(bytes.Repeat([]byte{'x'}, plainLen)); err != nil {
+		t.Fatalf("plain.Write: %v", err)
+	}
+
+	var probedInput int64
+	comp := func(out io.Writer) (io.WriteCloser, error) {
+		return &linearProbeCompressor{
+			out:         out,
+			probedInput: &probedInput,
+			outputSize: func(n int) int {
+				return n
+			},
+		}, nil
+	}
+
+	w := &MultiVolumeWriter{}
+	n, compressed, err := w.maxCompressedChunkBufferedWithCompressor(
+		Method1,
+		plain,
+		0,
+		plainLen,
+		maxComp,
+		comp,
+		DefaultMaxMethod14InputBufferSize,
+	)
+	if err != nil {
+		t.Fatalf("maxCompressedChunkBufferedWithCompressor: %v", err)
+	}
+	if got, want := n, maxComp; got != want {
+		t.Fatalf("selected chunk = %d, want %d", got, want)
+	}
+	if int64(len(compressed)) > maxComp {
+		t.Fatalf("compressed len = %d, want <= %d", len(compressed), maxComp)
+	}
+	if probedInput >= plainLen {
+		t.Fatalf("probed input = %d, want less than delayed full probe size %d", probedInput, plainLen)
+	}
+}
+
 func TestMultiVolumeWriterSelectSegmentDataCompressedReturnsProbeCRC(t *testing.T) {
 	payload := bytes.Repeat([]byte("compressed-crc-probe-"), 128)
 	plain := newEntryBuffer(uint64(len(payload)), bufferScopeMultiEntryPlain)

@@ -1935,6 +1935,20 @@ func maxCompressedChunkCanStopRefining(method uint16, plainLen, remainingRange i
 		remainingRange <= maxCompressedChunkNativeRefineWindow
 }
 
+func maxCompressedChunkShouldDelayFullProbe(method uint16, plainLen int, maxComp int64) bool {
+	return isNativeMethod14(method) &&
+		plainLen > method14CompressorChunkSize &&
+		maxComp > 0 &&
+		int64(plainLen) > 2*maxComp
+}
+
+func compressedProbeSuggestsFullMayFit(probeN int, comp []byte, fullN int, maxComp int64) bool {
+	if probeN <= 0 || fullN <= probeN || maxComp < 0 || len(comp) == 0 {
+		return false
+	}
+	return float64(len(comp))*float64(fullN) <= float64(maxComp)*float64(probeN)
+}
+
 func (w *MultiVolumeWriter) maxCompressedChunkBufferedWithCompressorAndCRC(
 	method uint16,
 	plain *entryBuffer,
@@ -2103,17 +2117,29 @@ func (w *MultiVolumeWriter) maxCompressedChunkBufferedWithCompressorAndCRC(
 	}
 
 	// First probe the full payload so non-monotonic compressors that shrink on
-	// larger prefixes can still take the whole chunk in one step.
+	// larger prefixes can still take the whole chunk in one step. Native
+	// method 1-4 probes are expensive, so delay this full-size probe when the
+	// volume budget is clearly much smaller than the available plain prefix.
 	fullN := plainLen
-	fullProbe, fullComp, err := probe(fullN)
-	if err != nil {
-		return 0, nil, 0, err
-	}
-	if fullProbe.fit {
-		return fullN, fullComp, fullProbe.crc, nil
-	}
 	if fullN == 1 {
+		fullProbe, fullComp, err := probe(fullN)
+		if err != nil {
+			return 0, nil, 0, err
+		}
+		if fullProbe.fit {
+			return fullN, fullComp, fullProbe.crc, nil
+		}
 		return 0, nil, 0, nil
+	}
+	delayFullProbe := maxCompressedChunkShouldDelayFullProbe(method, fullN, maxComp)
+	if !delayFullProbe {
+		fullProbe, fullComp, err := probe(fullN)
+		if err != nil {
+			return 0, nil, 0, err
+		}
+		if fullProbe.fit {
+			return fullN, fullComp, fullProbe.crc, nil
+		}
 	}
 
 	maxFitN := 0
@@ -2144,6 +2170,15 @@ func (w *MultiVolumeWriter) maxCompressedChunkBufferedWithCompressorAndCRC(
 	observe(probeN, probeFits)
 	if violated() {
 		return boundedFallback()
+	}
+	if delayFullProbe && probeFits && compressedProbeSuggestsFullMayFit(probeN, probeComp, fullN, maxComp) {
+		fullProbe, fullComp, err := probe(fullN)
+		if err != nil {
+			return 0, nil, 0, err
+		}
+		if fullProbe.fit {
+			return fullN, fullComp, fullProbe.crc, nil
+		}
 	}
 
 	bestN := 0
