@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"io/fs"
 	"sort"
@@ -357,8 +358,9 @@ func (f *File) OpenRaw() (io.Reader, error) {
 // CreateRaw adds a file to the archive by writing caller-provided local-header
 // metadata and raw entry bytes without compression.
 //
-// CreateRaw normalizes/defaults missing local-header fields, but it does not
-// derive or verify CRC/size values from the written payload.
+// CreateRaw normalizes/defaults missing local-header fields. The returned
+// writer validates the compressed byte count on Close. For Store entries, it
+// also validates the uncompressed size and CRC from the written payload bytes.
 func (w *Writer) CreateRaw(fh *FileHeader) (io.Writer, error) {
 	if err := w.prepare(); err != nil {
 		return nil, err
@@ -433,10 +435,18 @@ func (w *Writer) CreateRaw(fh *FileHeader) (io.Writer, error) {
 		return nil, err
 	}
 
-	if h.isDir() {
-		return rawDirWriter{}, nil
+	var sum hash32
+	if h.Method == Store {
+		sum = crc32.NewIEEE()
 	}
-	return rawFileWriter{w: w.cw}, nil
+	fw := &rawFileWriter{
+		owner: w,
+		h:     &h,
+		w:     w.cw,
+		crc:   sum,
+	}
+	w.last = fw
+	return fw, nil
 }
 
 func writeLocalFileHeader(w io.Writer, h *FileHeader) error {
@@ -490,20 +500,136 @@ func writeLocalFileHeader(w io.Writer, h *FileHeader) error {
 }
 
 type rawFileWriter struct {
-	w io.Writer
+	owner    *Writer
+	h        *FileHeader
+	w        io.Writer
+	rawN     uint64
+	crc      hash32
+	writeErr error
+	closed   bool
 }
 
-func (w rawFileWriter) Write(p []byte) (int, error) {
-	return w.w.Write(p)
+func (w *rawFileWriter) latchWriteErr(err error) {
+	if err == nil || w.writeErr != nil {
+		return
+	}
+	w.writeErr = err
 }
 
-type rawDirWriter struct{}
-
-func (rawDirWriter) Write(p []byte) (int, error) {
+func (w *rawFileWriter) Write(p []byte) (int, error) {
+	if w.closed {
+		return 0, errors.New("arj: write to closed raw file")
+	}
+	if w.writeErr != nil {
+		return 0, w.writeErr
+	}
 	if len(p) == 0 {
 		return 0, nil
 	}
-	return 0, errDirectoryFileData
+	if w.h == nil || w.w == nil {
+		w.latchWriteErr(ErrFormat)
+		return 0, w.writeErr
+	}
+	if w.h.isDir() {
+		w.latchWriteErr(errDirectoryFileData)
+		return 0, w.writeErr
+	}
+	if w.rawN >= w.h.CompressedSize64 {
+		err := fmt.Errorf("%w: payload exceeds header compressed size %d", errRawPayloadSizeMismatch, w.h.CompressedSize64)
+		w.latchWriteErr(err)
+		return 0, err
+	}
+
+	remaining := w.h.CompressedSize64 - w.rawN
+	chunk := p
+	limited := false
+	if uint64(len(chunk)) > remaining {
+		chunk = chunk[:int(remaining)]
+		limited = true
+	}
+
+	n, err := w.w.Write(chunk)
+	if n > 0 {
+		if w.h.Method == Store && w.crc != nil {
+			_, _ = w.crc.Write(chunk[:n])
+		}
+		w.rawN += uint64(n)
+	}
+	if err != nil {
+		w.latchWriteErr(err)
+		return n, err
+	}
+	if n != len(chunk) {
+		err = io.ErrShortWrite
+		w.latchWriteErr(err)
+		return n, err
+	}
+	if limited {
+		err = fmt.Errorf("%w: payload exceeds header compressed size %d", errRawPayloadSizeMismatch, w.h.CompressedSize64)
+		w.latchWriteErr(err)
+		return n, err
+	}
+	return n, nil
+}
+
+func (w *rawFileWriter) Close() error {
+	return w.close()
+}
+
+func (w *rawFileWriter) isClosed() bool {
+	return w.closed
+}
+
+func (w *rawFileWriter) writeError() error {
+	if w == nil {
+		return nil
+	}
+	return w.writeErr
+}
+
+func (w *rawFileWriter) close() (err error) {
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+	defer func() {
+		if err != nil && w.owner != nil {
+			w.owner.latchFailure(err)
+		}
+	}()
+	if w.h == nil {
+		return ErrFormat
+	}
+	if w.writeErr != nil {
+		return w.writeErr
+	}
+	if w.h.isDir() {
+		if w.rawN != 0 {
+			return errDirectoryFileData
+		}
+		if w.owner != nil {
+			w.owner.last = nil
+		}
+		return nil
+	}
+	if w.rawN != w.h.CompressedSize64 {
+		return fmt.Errorf("%w: payload=%d header=%d", errRawPayloadSizeMismatch, w.rawN, w.h.CompressedSize64)
+	}
+	if w.h.Method == Store {
+		if w.rawN != w.h.UncompressedSize64 {
+			return fmt.Errorf("%w: payload=%d header=%d", errRawStoreSizeMismatch, w.rawN, w.h.UncompressedSize64)
+		}
+		if w.crc == nil {
+			return ErrFormat
+		}
+		if got := w.crc.Sum32(); got != w.h.CRC32 {
+			return fmt.Errorf("%w: payload crc=%08x header=%08x", ErrChecksum, got, w.h.CRC32)
+		}
+	}
+	if w.owner != nil {
+		w.owner.last = nil
+	}
+	return nil
 }
 
 func closeStagedWriterIfPossible(w io.Writer) error {
@@ -560,10 +686,9 @@ func (w *Writer) Copy(f *File) error {
 	}
 	cause = errors.Join(cause, copyErr, readCloseErr)
 	if cause != nil {
-		w.latchFailure(cause)
-		return cause
+		return abortStagedWriter(fw, cause)
 	}
-	return nil
+	return closeStagedWriterIfPossible(fw)
 }
 
 // AddFS adds files from fsys to the archive while preserving the directory tree.

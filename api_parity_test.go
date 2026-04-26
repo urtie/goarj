@@ -821,6 +821,108 @@ func TestWriterCreateRaw(t *testing.T) {
 	}
 }
 
+func TestWriterCreateRawAutoClosesBeforeNextEntry(t *testing.T) {
+	payload := []byte("raw-store-payload")
+	tailPayload := []byte("tail")
+
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	fw, err := w.CreateRaw(&FileHeader{
+		Name:               "raw-store.bin",
+		Method:             Store,
+		CRC32:              crc32.ChecksumIEEE(payload),
+		CompressedSize64:   uint64(len(payload)),
+		UncompressedSize64: uint64(len(payload)),
+	})
+	if err != nil {
+		t.Fatalf("CreateRaw: %v", err)
+	}
+	if _, err := fw.Write(payload); err != nil {
+		t.Fatalf("Write raw payload: %v", err)
+	}
+
+	tail, err := w.CreateHeader(&FileHeader{Name: "tail.bin", Method: Store})
+	if err != nil {
+		t.Fatalf("CreateHeader tail: %v", err)
+	}
+	if _, err := tail.Write(tailPayload); err != nil {
+		t.Fatalf("Write tail: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close writer: %v", err)
+	}
+
+	r, err := NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	if got, want := len(r.File), 2; got != want {
+		t.Fatalf("file count = %d, want %d", got, want)
+	}
+	if got := mustReadFileEntry(t, r.File[0]); !bytes.Equal(got, payload) {
+		t.Fatalf("raw payload = %q, want %q", got, payload)
+	}
+	if got := mustReadFileEntry(t, r.File[1]); !bytes.Equal(got, tailPayload) {
+		t.Fatalf("tail payload = %q, want %q", got, tailPayload)
+	}
+}
+
+func TestWriterCreateRawRejectsCompressedSizeMismatch(t *testing.T) {
+	payload := []byte("too-long")
+
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	fw, err := w.CreateRaw(&FileHeader{
+		Name:               "bad-raw.bin",
+		Method:             Store,
+		CRC32:              crc32.ChecksumIEEE(payload),
+		CompressedSize64:   uint64(len(payload) - 1),
+		UncompressedSize64: uint64(len(payload)),
+	})
+	if err != nil {
+		t.Fatalf("CreateRaw: %v", err)
+	}
+	n, err := fw.Write(payload)
+	if got, want := n, len(payload)-1; got != want {
+		t.Fatalf("Write bytes = %d, want %d", got, want)
+	}
+	if !errors.Is(err, errRawPayloadSizeMismatch) {
+		t.Fatalf("Write error = %v, want %v", err, errRawPayloadSizeMismatch)
+	}
+	if err := fw.(io.Closer).Close(); !errors.Is(err, errRawPayloadSizeMismatch) {
+		t.Fatalf("Close raw writer error = %v, want %v", err, errRawPayloadSizeMismatch)
+	}
+	if err := w.Close(); !errors.Is(err, errRawPayloadSizeMismatch) {
+		t.Fatalf("Close writer error = %v, want %v", err, errRawPayloadSizeMismatch)
+	}
+}
+
+func TestWriterCreateRawRejectsStoreCRCMismatch(t *testing.T) {
+	payload := []byte("crc-mismatch")
+
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	fw, err := w.CreateRaw(&FileHeader{
+		Name:               "bad-crc.bin",
+		Method:             Store,
+		CRC32:              crc32.ChecksumIEEE([]byte("different")),
+		CompressedSize64:   uint64(len(payload)),
+		UncompressedSize64: uint64(len(payload)),
+	})
+	if err != nil {
+		t.Fatalf("CreateRaw: %v", err)
+	}
+	if _, err := fw.Write(payload); err != nil {
+		t.Fatalf("Write raw payload: %v", err)
+	}
+	if err := fw.(io.Closer).Close(); !errors.Is(err, ErrChecksum) {
+		t.Fatalf("Close raw writer error = %v, want %v", err, ErrChecksum)
+	}
+	if err := w.Close(); !errors.Is(err, ErrChecksum) {
+		t.Fatalf("Close writer error = %v, want %v", err, ErrChecksum)
+	}
+}
+
 func TestWriterCopy(t *testing.T) {
 	payload := []byte("copy-payload")
 	rawPayload := xorBytes(payload)

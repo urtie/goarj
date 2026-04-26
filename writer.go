@@ -126,7 +126,7 @@ type method14InputLimitSetter interface {
 type Writer struct {
 	cw           *countWriter
 	streamSeeker io.WriteSeeker
-	last         *fileWriter
+	last         writerEntryWriter
 	closed       bool
 	failed       error
 	wroteMain    bool
@@ -140,6 +140,12 @@ type Writer struct {
 	bufferLimit  WriteBufferLimits
 	bufferLimitV atomic.Value // WriteBufferLimits
 	writeStarted atomic.Bool
+}
+
+type writerEntryWriter interface {
+	close() error
+	isClosed() bool
+	writeError() error
 }
 
 // NewWriter returns a new Writer writing an ARJ archive to w.
@@ -286,12 +292,12 @@ func (w *Writer) Close() error {
 	if w.failed != nil {
 		// Best-effort cleanup for a poisoned staged entry. writeErr indicates
 		// close cannot emit/commit local header+data.
-		if w.last != nil && !w.last.closed && w.last.writeErr != nil {
+		if w.last != nil && !w.last.isClosed() && w.last.writeError() != nil {
 			_ = w.last.close()
 		}
 		return w.failed
 	}
-	if w.last != nil && !w.last.closed {
+	if w.last != nil && !w.last.isClosed() {
 		if err := w.last.close(); err != nil {
 			w.latchFailure(err)
 			return err
@@ -498,7 +504,7 @@ func (w *Writer) prepare() error {
 	if w.closed {
 		return errors.New("arj: write to closed writer")
 	}
-	if w.last != nil && !w.last.closed {
+	if w.last != nil && !w.last.isClosed() {
 		if err := w.last.close(); err != nil {
 			w.latchFailure(err)
 			return err
@@ -717,6 +723,17 @@ func (w *fileWriter) Write(p []byte) (int, error) {
 
 func (w *fileWriter) Close() error {
 	return w.close()
+}
+
+func (w *fileWriter) isClosed() bool {
+	return w.closed
+}
+
+func (w *fileWriter) writeError() error {
+	if w == nil {
+		return nil
+	}
+	return w.writeErr
 }
 
 func (w *fileWriter) close() (err error) {
