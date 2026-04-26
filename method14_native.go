@@ -61,7 +61,6 @@ type method14Compressor struct {
 	written      uint64
 	fatalErr     error
 	pending      []byte
-	pendingOff   int
 	bw           *arjBitWriter
 	method123Enc method123BitEncoder
 	closed       bool
@@ -284,9 +283,8 @@ func (w *method14Compressor) Write(p []byte) (int, error) {
 		chunk = chunk[:int(remaining)]
 		limited = true
 	}
-	w.pending = append(w.pending, chunk...)
 	w.written += uint64(len(chunk))
-	if err := w.flushPendingFullChunks(); err != nil {
+	if err := w.writeChunks(chunk); err != nil {
 		w.fatalErr = err
 		return len(chunk), err
 	}
@@ -335,42 +333,41 @@ func (w *method14Compressor) limitErr(attempted int) *BufferLimitError {
 	}
 }
 
-func (w *method14Compressor) flushPendingFullChunks() error {
-	for len(w.pending)-w.pendingOff >= method14CompressorChunkSize {
-		chunk := w.pending[w.pendingOff : w.pendingOff+method14CompressorChunkSize]
-		if err := w.encodeChunk(chunk); err != nil {
-			return err
-		}
-		w.pendingOff += method14CompressorChunkSize
-	}
-	w.compactPending()
-	return nil
-}
-
 func (w *method14Compressor) flushAllPending() error {
-	for w.pendingOff < len(w.pending) {
-		chunk := w.pending[w.pendingOff:]
-		if err := w.encodeChunk(chunk); err != nil {
+	if len(w.pending) != 0 {
+		if err := w.encodeChunk(w.pending); err != nil {
 			return err
 		}
-		w.pendingOff = len(w.pending)
+		w.pending = w.pending[:0]
 	}
-	w.compactPending()
 	return nil
 }
 
-func (w *method14Compressor) compactPending() {
-	if w.pendingOff == 0 {
-		return
-	}
-	if w.pendingOff >= len(w.pending) {
+func (w *method14Compressor) writeChunks(p []byte) error {
+	if len(w.pending) != 0 {
+		need := method14CompressorChunkSize - len(w.pending)
+		if need > len(p) {
+			w.pending = append(w.pending, p...)
+			return nil
+		}
+		w.pending = append(w.pending, p[:need]...)
+		if err := w.encodeChunk(w.pending); err != nil {
+			return err
+		}
 		w.pending = w.pending[:0]
-		w.pendingOff = 0
-		return
+		p = p[need:]
 	}
-	copy(w.pending, w.pending[w.pendingOff:])
-	w.pending = w.pending[:len(w.pending)-w.pendingOff]
-	w.pendingOff = 0
+
+	for len(p) >= method14CompressorChunkSize {
+		if err := w.encodeChunk(p[:method14CompressorChunkSize]); err != nil {
+			return err
+		}
+		p = p[method14CompressorChunkSize:]
+	}
+	if len(p) != 0 {
+		w.pending = append(w.pending[:0], p...)
+	}
+	return nil
 }
 
 func (w *method14Compressor) encodeChunk(chunk []byte) error {

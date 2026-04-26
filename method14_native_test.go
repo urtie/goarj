@@ -297,8 +297,8 @@ func TestMethod14CompressorStreamsChunksBeforeClose(t *testing.T) {
 	}
 
 	mc := cw.(*method14Compressor)
-	if got := len(mc.pending) - mc.pendingOff; got >= method14CompressorChunkSize {
-		t.Fatalf("pending input = %d, want < %d", got, method14CompressorChunkSize)
+	if got, want := len(mc.pending), len(payload)%method14CompressorChunkSize; got != want {
+		t.Fatalf("pending input = %d, want trailing partial chunk %d", got, want)
 	}
 
 	if err := cw.Close(); err != nil {
