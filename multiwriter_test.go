@@ -273,6 +273,154 @@ func TestMultiVolumeWriterRoundTripOpenMultiReader(t *testing.T) {
 	}
 }
 
+func TestMultiVolumeWriterCompressedSmallWritesUseSeparateVolumes(t *testing.T) {
+	tmp := t.TempDir()
+	archivePath := filepath.Join(tmp, "small-writes.arj")
+	chunks := [][]byte{
+		[]byte("small-"),
+		[]byte("writes-"),
+		[]byte("payload"),
+	}
+
+	mw, err := NewMultiVolumeWriter(archivePath, MultiVolumeWriterOptions{VolumeSize: 32 << 10})
+	if err != nil {
+		t.Fatalf("NewMultiVolumeWriter: %v", err)
+	}
+	fw, err := mw.CreateHeader(&FileHeader{Name: "small.bin", Method: Method1})
+	if err != nil {
+		t.Fatalf("CreateHeader: %v", err)
+	}
+	var want []byte
+	for _, chunk := range chunks {
+		want = append(want, chunk...)
+		if _, err := fw.Write(chunk); err != nil {
+			t.Fatalf("Write(%q): %v", chunk, err)
+		}
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got, want := len(mw.Parts()), len(chunks); got != want {
+		t.Fatalf("part count = %d, want %d", got, want)
+	}
+
+	paths, err := VolumePaths(archivePath)
+	if err != nil {
+		t.Fatalf("VolumePaths: %v", err)
+	}
+	if got, want := len(paths), len(chunks); got != want {
+		t.Fatalf("VolumePaths count = %d, want %d", got, want)
+	}
+	for i, path := range paths {
+		rc, err := OpenReader(path)
+		if err != nil {
+			t.Fatalf("OpenReader(%s): %v", path, err)
+		}
+		if got, want := len(rc.File), 1; got != want {
+			_ = rc.Close()
+			t.Fatalf("%s file count = %d, want %d", path, got, want)
+		}
+		gotFlags := rc.File[0].Flags & (FlagVolume | FlagExtFile)
+		wantFlags := FlagExtFile
+		switch i {
+		case 0:
+			wantFlags = FlagVolume
+		case len(paths) - 1:
+			wantFlags = FlagExtFile
+		default:
+			wantFlags = FlagVolume | FlagExtFile
+		}
+		if gotFlags != wantFlags {
+			_ = rc.Close()
+			t.Fatalf("%s continuation flags = 0x%02x, want 0x%02x", path, gotFlags, wantFlags)
+		}
+		if err := rc.Close(); err != nil {
+			t.Fatalf("Close(%s): %v", path, err)
+		}
+	}
+
+	mr, err := OpenMultiReader(archivePath)
+	if err != nil {
+		t.Fatalf("OpenMultiReader: %v", err)
+	}
+	defer mr.Close()
+	if got, want := len(mr.File), 1; got != want {
+		t.Fatalf("merged file count = %d, want %d", got, want)
+	}
+	if got := mustReadFileEntry(t, mr.File[0]); !bytes.Equal(got, want) {
+		t.Fatalf("payload = %q, want %q", got, want)
+	}
+}
+
+func TestMultiVolumeWriterCompressedContinuationUsesOneSegmentPerVolume(t *testing.T) {
+	tmp := t.TempDir()
+	archivePath := filepath.Join(tmp, "compressed-continuation.arj")
+	payload := make([]byte, 4<<10)
+	rng := rand.New(rand.NewSource(5678))
+	if _, err := rng.Read(payload); err != nil {
+		t.Fatalf("rand.Read: %v", err)
+	}
+
+	mw, err := NewMultiVolumeWriter(archivePath, MultiVolumeWriterOptions{VolumeSize: 4096})
+	if err != nil {
+		t.Fatalf("NewMultiVolumeWriter: %v", err)
+	}
+	fw, err := mw.CreateHeader(&FileHeader{Name: "split-compressed.bin", Method: Method1})
+	if err != nil {
+		t.Fatalf("CreateHeader: %v", err)
+	}
+	for off := 0; off < len(payload); {
+		end := off + 113
+		if end > len(payload) {
+			end = len(payload)
+		}
+		if _, err := fw.Write(payload[off:end]); err != nil {
+			t.Fatalf("Write(%d:%d): %v", off, end, err)
+		}
+		off = end
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	paths, err := VolumePaths(archivePath)
+	if err != nil {
+		t.Fatalf("VolumePaths: %v", err)
+	}
+	if got, min := len(paths), 2; got < min {
+		t.Fatalf("volume count = %d, want >= %d", got, min)
+	}
+	for _, path := range paths {
+		rc, err := OpenReader(path)
+		if err != nil {
+			t.Fatalf("OpenReader(%s): %v", path, err)
+		}
+		if got, want := len(rc.File), 1; got != want {
+			_ = rc.Close()
+			t.Fatalf("%s file count = %d, want %d", path, got, want)
+		}
+		if got, want := rc.File[0].Name, "split-compressed.bin"; got != want {
+			_ = rc.Close()
+			t.Fatalf("%s entry name = %q, want %q", path, got, want)
+		}
+		if err := rc.Close(); err != nil {
+			t.Fatalf("Close(%s): %v", path, err)
+		}
+	}
+
+	mr, err := OpenMultiReader(archivePath)
+	if err != nil {
+		t.Fatalf("OpenMultiReader: %v", err)
+	}
+	defer mr.Close()
+	if got, want := len(mr.File), 1; got != want {
+		t.Fatalf("merged file count = %d, want %d", got, want)
+	}
+	if got := mustReadFileEntry(t, mr.File[0]); !bytes.Equal(got, payload) {
+		t.Fatalf("merged payload mismatch")
+	}
+}
+
 func TestInteropARJBinaryExtractsMultiVolumeWriterArchive(t *testing.T) {
 	arjPath := requireInteropARJBinary(t)
 

@@ -27,15 +27,15 @@ var (
 	// single output volume.
 	ErrRawEntryTooLargeForVolume = errors.New("arj: raw entry does not fit in a single volume")
 
-	errInvalidMultiVolumeSize     = ErrInvalidMultiVolumeSize
-	errMultiVolumePath            = ErrInvalidMultiVolumePath
-	errVolumeTooSmall             = errors.New("arj: volume size too small")
-	errNoSegmentFit               = errors.New("arj: segment does not fit current volume")
-	errCompressedProbeLimit       = errors.New("arj: compressed probe output limit exceeded")
-	errRawCopySizeMismatch        = errors.New("arj: raw copy byte count mismatch")
-	errRawPayloadSizeMismatch     = errors.New("arj: raw payload size does not match local header compressed size")
-	errRawStoreSizeMismatch       = errors.New("arj: raw store payload size does not match local header uncompressed size")
-	checksumScratchPool           = sync.Pool{
+	errInvalidMultiVolumeSize = ErrInvalidMultiVolumeSize
+	errMultiVolumePath        = ErrInvalidMultiVolumePath
+	errVolumeTooSmall         = errors.New("arj: volume size too small")
+	errNoSegmentFit           = errors.New("arj: segment does not fit current volume")
+	errCompressedProbeLimit   = errors.New("arj: compressed probe output limit exceeded")
+	errRawCopySizeMismatch    = errors.New("arj: raw copy byte count mismatch")
+	errRawPayloadSizeMismatch = errors.New("arj: raw payload size does not match local header compressed size")
+	errRawStoreSizeMismatch   = errors.New("arj: raw store payload size does not match local header uncompressed size")
+	checksumScratchPool       = sync.Pool{
 		New: func() any {
 			return make([]byte, 32<<10)
 		},
@@ -883,6 +883,12 @@ func (w *multiVolumeCompressedFileWriter) writeSegmentFromPrefix(plain []byte) (
 	method := w.h.Method
 
 	for {
+		if w.lastSegment != nil {
+			if err := w.w.closeCurrentVolume(true); err != nil {
+				return 0, err
+			}
+			w.lastSegment = nil
+		}
 		if err := w.w.ensureCurrentVolume(); err != nil {
 			return 0, err
 		}
