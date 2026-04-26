@@ -795,6 +795,9 @@ func findMainHeaderOffsetWithBudgetAndLimits(r io.ReaderAt, size int64, budget *
 				if probeErr != nil {
 					return 0, normalizeMainHeaderProbeError(probeErr)
 				}
+				if ok && end == size {
+					return candidateOff, nil
+				}
 				if ok && (!found || files > best.files || (files == best.files && end > best.end)) {
 					best = headerCandidate{off: candidateOff, files: files, end: end}
 					found = true
@@ -820,6 +823,9 @@ func findMainHeaderOffsetWithBudgetAndLimits(r io.ReaderAt, size int64, budget *
 			files, end, ok, probeErr := probeArchiveLayoutWithLimits(probeReader, size, candidateOff, limits)
 			if probeErr != nil {
 				return 0, normalizeMainHeaderProbeError(probeErr)
+			}
+			if ok && end == size {
+				return candidateOff, nil
 			}
 			if ok && (!found || files > best.files || (files == best.files && end > best.end)) {
 				best = headerCandidate{off: candidateOff, files: files, end: end}

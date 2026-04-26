@@ -219,6 +219,28 @@ func TestFindMainHeaderOffsetHandlesSignatureSplitAcrossScanChunkBoundary(t *tes
 	}
 }
 
+func TestFindMainHeaderOffsetStopsAfterExactEOFCandidate(t *testing.T) {
+	payload := signatureDenseOffsetNoise(2 << 20)
+	real := buildSingleStoreArchive(t, "payload.bin", payload)
+	prefix := bytes.Repeat([]byte{0x35}, mainHeaderScanChunkSize+17)
+	container := append(append([]byte(nil), prefix...), real...)
+
+	reader := &countingReaderAt{data: container}
+	got, err := findMainHeaderOffset(reader, int64(len(container)))
+	if err != nil {
+		t.Fatalf("findMainHeaderOffset: %v", err)
+	}
+	if want := int64(len(prefix)); got != want {
+		t.Fatalf("findMainHeaderOffset = %d, want %d", got, want)
+	}
+
+	// The exact archive candidate reaches EOF, so the scanner should not keep
+	// reading through the large payload looking for a later candidate.
+	if gotReads, maxReads := reader.totalRead, int64(len(prefix)+mainHeaderScanChunkSize+4096); gotReads > maxReads {
+		t.Fatalf("read bytes after exact EOF candidate = %d, want <= %d", gotReads, maxReads)
+	}
+}
+
 func buildDecoyMainHeaderArchive(t *testing.T, name string, withTerminator bool) []byte {
 	t.Helper()
 
