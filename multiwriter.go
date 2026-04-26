@@ -51,6 +51,7 @@ const (
 	maxCompressedChunkExhaustiveThreshold = 2048
 	maxCompressedChunkProbeBudget         = 48
 	maxCompressedChunkLocalRefineWindow   = 96
+	maxCompressedChunkNativeRefineWindow  = 1 << 10
 	multiVolumeCompressedStreamChunkSize  = 64 << 10
 )
 
@@ -1887,6 +1888,32 @@ func (w *MultiVolumeWriter) maxCompressedChunkBufferedWithCompressor(
 	return n, comp, err
 }
 
+func nextCompressedChunkProbeSize(bestN, hiN int, bestComp []byte, maxComp int64) int {
+	n := bestN + (hiN-bestN)/2
+	if bestN <= 0 || hiN-bestN <= 1 || len(bestComp) == 0 || maxComp <= int64(len(bestComp)) {
+		return n
+	}
+
+	estimate := (int64(bestN) * maxComp) / int64(len(bestComp))
+	maxInt := int64(^uint(0) >> 1)
+	if estimate > maxInt {
+		estimate = maxInt
+	}
+	if estimate > int64(bestN) && estimate < int64(hiN) {
+		n = int(estimate)
+	}
+	return n
+}
+
+func maxCompressedChunkCanStopRefining(method uint16, plainLen, remainingRange int) bool {
+	// Native methods are expensive to re-run for adjacent lengths. Once the
+	// fitting prefix is within a small window, prefer the known-good chunk over
+	// exact byte-level packing.
+	return isNativeMethod14(method) &&
+		plainLen > maxCompressedChunkExhaustiveThreshold &&
+		remainingRange <= maxCompressedChunkNativeRefineWindow
+}
+
 func (w *MultiVolumeWriter) maxCompressedChunkBufferedWithCompressorAndCRC(
 	method uint16,
 	plain *entryBuffer,
@@ -2163,8 +2190,36 @@ func (w *MultiVolumeWriter) maxCompressedChunkBufferedWithCompressorAndCRC(
 		}
 	}
 
+	if minOverN > bestN && minOverN < hiN {
+		hiN = minOverN
+	}
+	for growN := bestN * 2; bestN > 0 && growN > bestN && growN < hiN; {
+		res, comp, err := probe(growN)
+		if err != nil {
+			return 0, nil, 0, err
+		}
+		fit := res.fit
+		observe(growN, fit)
+		if violated() {
+			return boundedFallback()
+		}
+		if !fit {
+			hiN = growN
+			break
+		}
+		bestN = growN
+		bestComp = comp
+		bestCRC = res.crc
+		if growN > hiN/2 {
+			break
+		}
+		growN *= 2
+	}
 	for hiN-bestN > 1 {
-		n := bestN + (hiN-bestN)/2
+		if maxCompressedChunkCanStopRefining(method, plainLen, hiN-bestN) {
+			break
+		}
+		n := nextCompressedChunkProbeSize(bestN, hiN, bestComp, maxComp)
 		res, comp, err := probe(n)
 		if err != nil {
 			return 0, nil, 0, err
