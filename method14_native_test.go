@@ -535,6 +535,50 @@ func TestMakeDecodeTableAllowsTerminalCodeWrap(t *testing.T) {
 	}
 }
 
+func TestReadPtLenRejectsMethodNTCountAboveTableSize(t *testing.T) {
+	data := methodNTLengthBlock(methodNT + 1)
+
+	t.Run("buffered", func(t *testing.T) {
+		var d method123Decoder
+		d.br = newARJBitReader(data)
+
+		if err := d.readPtLen(methodNT, methodTBIT, 3); !errors.Is(err, ErrFormat) {
+			t.Fatalf("readPtLen buffered error = %v, want %v", err, ErrFormat)
+		}
+	})
+
+	t.Run("stream", func(t *testing.T) {
+		var d method123BitStreamDecoder
+		d.br = newARJBitStreamReader(bytes.NewReader(data), int64(len(data)))
+
+		if err := d.readPtLen(methodNT, methodTBIT, 3); !errors.Is(err, ErrFormat) {
+			t.Fatalf("readPtLen stream error = %v, want %v", err, ErrFormat)
+		}
+	})
+}
+
+func TestReadPtLenAllowsMethodNTTableSize(t *testing.T) {
+	data := methodNTLengthBlock(methodNT)
+
+	t.Run("buffered", func(t *testing.T) {
+		var d method123Decoder
+		d.br = newARJBitReader(data)
+
+		if err := d.readPtLen(methodNT, methodTBIT, 3); err != nil {
+			t.Fatalf("readPtLen buffered error = %v, want nil", err)
+		}
+	})
+
+	t.Run("stream", func(t *testing.T) {
+		var d method123BitStreamDecoder
+		d.br = newARJBitStreamReader(bytes.NewReader(data), int64(len(data)))
+
+		if err := d.readPtLen(methodNT, methodTBIT, 3); err != nil {
+			t.Fatalf("readPtLen stream error = %v, want nil", err)
+		}
+	})
+}
+
 func TestReadPtLenSingleSymbolDoesNotResetDecodeTree(t *testing.T) {
 	var bw arjBitWriter
 	bw.putBits(methodPBIT, 0)
@@ -620,6 +664,35 @@ func (r *countingReader) Read(p []byte) (int, error) {
 	n, err := r.r.Read(p)
 	r.bytesRead += n
 	return n, err
+}
+
+func methodNTLengthBlock(count int) []byte {
+	var bw arjBitWriter
+	bw.putBits(methodTBIT, uint16(count))
+
+	// These 19 lengths form a valid methodNT decode table. An encoded count
+	// above this size must still be rejected instead of clamped.
+	lengths := []int{5, 5, 8, 0, 9, 9, 0, 8, 6, 5, 3, 2, 3, 3, 4, 4, 3, 8, 0}
+	for i, length := range lengths {
+		if i == 3 {
+			bw.putBits(2, 1)
+			continue
+		}
+		putMethod123PtLen(&bw, length)
+	}
+	return bw.finishWithShutdownPadding()
+}
+
+func putMethod123PtLen(bw *arjBitWriter, length int) {
+	if length < 7 {
+		bw.putBits(3, uint16(length))
+		return
+	}
+	bw.putBits(3, 7)
+	for i := 0; i < length-7; i++ {
+		bw.putBits(1, 1)
+	}
+	bw.putBits(1, 0)
 }
 
 type referenceARJBitWriter struct {

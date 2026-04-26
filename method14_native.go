@@ -1351,8 +1351,8 @@ func (d *method123Decoder) readPtLen(nn, nbit, iSpecial int) error {
 	}
 
 	i := 0
-	if n >= methodNPT {
-		n = methodNPT
+	if n > nn {
+		return ErrFormat
 	}
 	for i < n {
 		peek, err := d.br.peekBits(methodCodeBit)
@@ -1611,8 +1611,8 @@ func (d *method123BitStreamDecoder) readPtLen(nn, nbit, iSpecial int) error {
 	}
 
 	i := 0
-	if n >= methodNPT {
-		n = methodNPT
+	if n > nn {
+		return ErrFormat
 	}
 	for i < n {
 		peek, err := d.br.peekBits(methodCodeBit)
