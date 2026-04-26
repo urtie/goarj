@@ -79,7 +79,8 @@ type WriteBufferLimits struct {
 	MaxCompressedEntryBufferSize uint64
 
 	// MaxPlainEntryBufferSize limits plain bytes buffered per entry before
-	// returning ErrBufferLimitExceeded.
+	// returning ErrBufferLimitExceeded. MultiVolumeWriter may flush pending
+	// compressed-entry segments earlier when a volume boundary requires it.
 	//
 	// MultiVolumeWriter uses this for Create/CreateHeader.
 	MaxPlainEntryBufferSize uint64

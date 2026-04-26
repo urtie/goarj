@@ -399,7 +399,7 @@ func (w *MultiVolumeWriter) CreateHeader(fh *FileHeader) (io.Writer, error) {
 			h:                  &h,
 			compressor:         comp,
 			method14InputLimit: limits.MaxMethod14InputBufferSize,
-			pendingLimit:       multiVolumeCompressedPendingLimit,
+			pendingLimit:       limits.MaxPlainEntryBufferSize,
 		}
 		w.last = cw
 		return cw, nil
@@ -864,6 +864,11 @@ func (w *multiVolumeCompressedFileWriter) Write(p []byte) (int, error) {
 				w.latchWriteErr(err)
 				return total, err
 			}
+			if pendingRoom = w.pendingLimitOrDefault() - w.pendingUnread(); pendingRoom == 0 {
+				limitErr := w.pendingLimitErr(len(p))
+				w.latchWriteErr(limitErr)
+				return total, limitErr
+			}
 			continue
 		}
 		if uint64(chunkN) > pendingRoom {
@@ -923,7 +928,7 @@ func (w *multiVolumeCompressedFileWriter) flushPendingForWrite() error {
 		if unread == 0 {
 			return nil
 		}
-		force := unread >= w.pendingLimitOrDefault()
+		force := false
 		if isNativeMethod14(w.h.Method) && unread > w.method14InputLimit {
 			force = true
 		}
@@ -1114,6 +1119,15 @@ func (w *multiVolumeCompressedFileWriter) pendingLimitOrDefault() uint64 {
 		return w.pendingLimit
 	}
 	return multiVolumeCompressedPendingLimit
+}
+
+func (w *multiVolumeCompressedFileWriter) pendingLimitErr(attempted int) *BufferLimitError {
+	return &BufferLimitError{
+		Scope:     bufferScopeMultiEntryPlain,
+		Limit:     w.pendingLimitOrDefault(),
+		Buffered:  w.pendingUnread(),
+		Attempted: uint64(attempted),
+	}
 }
 
 func (w *multiVolumeCompressedFileWriter) method14InputLimitErr(attempted int) *BufferLimitError {

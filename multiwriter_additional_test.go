@@ -592,10 +592,13 @@ func TestMultiVolumeWriterCompressedStreamingUnaffectedByLimitChanges(t *testing
 		t.Fatalf("NewMultiVolumeWriter: %v", err)
 	}
 
-	mw.SetBufferLimits(WriteBufferLimits{MaxPlainEntryBufferSize: 4})
+	mw.SetBufferLimits(WriteBufferLimits{MaxPlainEntryBufferSize: 6})
 	fw1, err := mw.Create("first.bin")
 	if err != nil {
 		t.Fatalf("Create(first): %v", err)
+	}
+	if got, want := fw1.(*multiVolumeCompressedFileWriter).pendingLimit, uint64(6); got != want {
+		t.Fatalf("first pendingLimit = %d, want %d", got, want)
 	}
 
 	mw.SetBufferLimits(WriteBufferLimits{MaxPlainEntryBufferSize: 16})
@@ -613,6 +616,9 @@ func TestMultiVolumeWriterCompressedStreamingUnaffectedByLimitChanges(t *testing
 	fw2, err := mw.Create("second.bin")
 	if err != nil {
 		t.Fatalf("Create(second): %v", err)
+	}
+	if got, want := fw2.(*multiVolumeCompressedFileWriter).pendingLimit, uint64(16); got != want {
+		t.Fatalf("second pendingLimit = %d, want %d", got, want)
 	}
 	n, err = fw2.Write([]byte("abcdef"))
 	if got, want := n, 6; got != want {
