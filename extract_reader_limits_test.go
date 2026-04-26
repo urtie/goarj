@@ -327,6 +327,12 @@ func TestReaderOptionValidationSentinels(t *testing.T) {
 			opts: ReaderOptions{MainHeaderProbeBudget: -1},
 			want: ErrInvalidMainHeaderProbeBudget,
 		},
+		{
+			name: "max header scan bytes",
+			size: 0,
+			opts: ReaderOptions{MaxHeaderScanBytes: -1},
+			want: ErrInvalidReaderHeaderScanLimit,
+		},
 	}
 
 	for _, tc := range tests {

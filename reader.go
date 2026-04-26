@@ -19,6 +19,9 @@ const (
 	mainHeaderProbeBudgetMultiplier int64 = 32
 	// DefaultMainHeaderProbeBudgetMax caps adaptive main-header probe work.
 	DefaultMainHeaderProbeBudgetMax int64 = 128 << 20
+	// DefaultReaderMaxHeaderScanBytes caps leading-byte scanning while searching
+	// for an embedded ARJ main header.
+	DefaultReaderMaxHeaderScanBytes int64 = 128 << 20
 )
 
 const (
@@ -60,6 +63,10 @@ type ParserLimits struct {
 // ReaderOptions configures NewReaderWithOptions/OpenReaderWithOptions.
 type ReaderOptions struct {
 	ParserLimits ParserLimits
+	// MaxHeaderScanBytes limits how many leading bytes may be scanned while
+	// searching for an embedded ARJ main header. Zero uses
+	// DefaultReaderMaxHeaderScanBytes. Set a larger value for large SFX prefixes.
+	MaxHeaderScanBytes int64
 	// MainHeaderProbeBudget limits candidate-probing work while searching for
 	// the archive main header offset. Zero uses an adaptive default capped at
 	// DefaultMainHeaderProbeBudgetMax.
@@ -83,6 +90,8 @@ var (
 	ErrInvalidParserMaxExtendedHeaderBytes = errors.New("arj: ParserLimits.MaxExtendedHeaderBytes must be >= 0")
 	// ErrInvalidMainHeaderProbeBudget indicates ReaderOptions.MainHeaderProbeBudget is invalid.
 	ErrInvalidMainHeaderProbeBudget = errors.New("arj: main header probe budget must be >= 0")
+	// ErrInvalidReaderHeaderScanLimit indicates ReaderOptions.MaxHeaderScanBytes is invalid.
+	ErrInvalidReaderHeaderScanLimit = errors.New("arj: max header scan bytes must be >= 0")
 
 	errMainHeaderProbeBudgetExceeded = errors.New("arj: main header probe budget exceeded")
 )
@@ -153,7 +162,7 @@ func OpenReaderWithOptions(name string, opts ReaderOptions) (*ReadCloser, error)
 		return nil, err
 	}
 	r := new(ReadCloser)
-	if err := r.init(f, fi.Size(), opts.ParserLimits, opts.MainHeaderProbeBudget); err != nil {
+	if err := r.init(f, fi.Size(), opts.ParserLimits, opts.MainHeaderProbeBudget, opts.MaxHeaderScanBytes); err != nil {
 		_ = f.Close()
 		return nil, err
 	}
@@ -182,7 +191,7 @@ func NewReaderWithOptions(r io.ReaderAt, size int64, opts ReaderOptions) (*Reade
 	opts = normalizeReaderOptions(opts)
 
 	zr := new(Reader)
-	if err := zr.init(r, size, opts.ParserLimits, opts.MainHeaderProbeBudget); err != nil {
+	if err := zr.init(r, size, opts.ParserLimits, opts.MainHeaderProbeBudget, opts.MaxHeaderScanBytes); err != nil {
 		return nil, err
 	}
 	return zr, nil
@@ -192,11 +201,17 @@ func validateReaderOptions(opts ReaderOptions) error {
 	if opts.MainHeaderProbeBudget < 0 {
 		return ErrInvalidMainHeaderProbeBudget
 	}
+	if opts.MaxHeaderScanBytes < 0 {
+		return ErrInvalidReaderHeaderScanLimit
+	}
 	return validateParserLimits(opts.ParserLimits)
 }
 
 func normalizeReaderOptions(opts ReaderOptions) ReaderOptions {
 	opts.ParserLimits = normalizeParserLimits(opts.ParserLimits)
+	if opts.MaxHeaderScanBytes == 0 {
+		opts.MaxHeaderScanBytes = DefaultReaderMaxHeaderScanBytes
+	}
 	return opts
 }
 
@@ -297,14 +312,15 @@ func (r *Reader) BaseOffset() int64 {
 	return r.baseOffset
 }
 
-func (r *Reader) init(rdr io.ReaderAt, size int64, parserLimits ParserLimits, mainHeaderProbeBudget int64) error {
+func (r *Reader) init(rdr io.ReaderAt, size int64, parserLimits ParserLimits, mainHeaderProbeBudget, maxHeaderScanBytes int64) error {
 	limits := normalizeParserLimits(parserLimits)
 
-	start, err := findMainHeaderOffsetWithBudgetAndLimits(
+	start, err := findMainHeaderOffsetWithBudgetLimitsAndScanLimit(
 		rdr,
 		size,
 		newMainHeaderProbeBudget(size, mainHeaderProbeBudget),
 		limits,
+		maxHeaderScanBytes,
 	)
 	if err != nil {
 		return err
@@ -781,6 +797,10 @@ func findMainHeaderOffsetWithBudget(r io.ReaderAt, size int64, budget *mainHeade
 }
 
 func findMainHeaderOffsetWithBudgetAndLimits(r io.ReaderAt, size int64, budget *mainHeaderProbeBudget, limits ParserLimits) (int64, error) {
+	return findMainHeaderOffsetWithBudgetLimitsAndScanLimit(r, size, budget, limits, DefaultReaderMaxHeaderScanBytes)
+}
+
+func findMainHeaderOffsetWithBudgetLimitsAndScanLimit(r io.ReaderAt, size int64, budget *mainHeaderProbeBudget, limits ParserLimits, maxHeaderScanBytes int64) (int64, error) {
 	type headerCandidate struct {
 		off   int64
 		files int
@@ -797,6 +817,9 @@ func findMainHeaderOffsetWithBudgetAndLimits(r io.ReaderAt, size int64, budget *
 	limits = normalizeParserLimits(limits)
 	if budget == nil {
 		budget = newMainHeaderProbeBudget(size, 0)
+	}
+	if maxHeaderScanBytes == 0 {
+		maxHeaderScanBytes = DefaultReaderMaxHeaderScanBytes
 	}
 	scanReader := r
 	probeReader := &budgetedReaderAt{r: r, budget: budget}
@@ -817,9 +840,11 @@ func findMainHeaderOffsetWithBudgetAndLimits(r io.ReaderAt, size int64, budget *
 		prevLast byte
 		havePrev bool
 	)
-	for off := int64(0); off < size; {
+	scanEnd := mainHeaderScanEnd(size, maxHeaderScanBytes)
+scanLoop:
+	for off := int64(0); off < scanEnd; {
 		n := int64(len(buf))
-		if remain := size - off; remain < n {
+		if remain := scanEnd - off; remain < n {
 			n = remain
 		}
 		chunk := buf[:n]
@@ -829,6 +854,9 @@ func findMainHeaderOffsetWithBudgetAndLimits(r io.ReaderAt, size int64, budget *
 
 		if havePrev && len(chunk) != 0 && prevLast == arjHeaderID1 && chunk[0] == arjHeaderID2 {
 			candidateOff := off - 1
+			if mainHeaderScanCandidateBeyondLimit(candidateOff, maxHeaderScanBytes) {
+				break scanLoop
+			}
 			prefilterPass := true
 			if len(chunk) >= 3 {
 				basicSize := int(binary.LittleEndian.Uint16(chunk[1:3]))
@@ -857,6 +885,9 @@ func findMainHeaderOffsetWithBudgetAndLimits(r io.ReaderAt, size int64, budget *
 			}
 			pos := i + next
 			candidateOff := off + int64(pos)
+			if mainHeaderScanCandidateBeyondLimit(candidateOff, maxHeaderScanBytes) {
+				break scanLoop
+			}
 			if pos+3 < len(chunk) {
 				basicSize := int(binary.LittleEndian.Uint16(chunk[pos+2 : pos+4]))
 				if !mainHeaderCandidateBasicSizePassesPrefilter(size, candidateOff, basicSize) {
@@ -888,6 +919,24 @@ func findMainHeaderOffsetWithBudgetAndLimits(r io.ReaderAt, size int64, budget *
 		return 0, ErrFormat
 	}
 	return best.off, nil
+}
+
+func mainHeaderScanEnd(size, maxHeaderScanBytes int64) int64 {
+	if maxHeaderScanBytes <= 0 {
+		return size
+	}
+	if maxHeaderScanBytes > math.MaxInt64-2 {
+		return size
+	}
+	end := maxHeaderScanBytes + 2
+	if end > size {
+		return size
+	}
+	return end
+}
+
+func mainHeaderScanCandidateBeyondLimit(candidateOff, maxHeaderScanBytes int64) bool {
+	return maxHeaderScanBytes > 0 && candidateOff > maxHeaderScanBytes
 }
 
 func normalizeMainHeaderProbeError(err error) error {

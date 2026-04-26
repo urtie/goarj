@@ -291,6 +291,86 @@ func TestNewReaderWithOptionsMainHeaderProbeBudget(t *testing.T) {
 	}
 }
 
+func TestNewReaderWithOptionsMaxHeaderScanBytes(t *testing.T) {
+	real := buildSingleStoreArchive(t, "opts-scan.bin", []byte("payload"))
+	prefix := bytes.Repeat([]byte{0x11}, 32<<10)
+
+	container := append(append([]byte(nil), prefix...), real...)
+	size := int64(len(container))
+
+	_, err := NewReaderWithOptions(bytes.NewReader(container), size, ReaderOptions{
+		MaxHeaderScanBytes: int64(len(prefix) - 1),
+	})
+	if !errors.Is(err, ErrFormat) {
+		t.Fatalf("NewReaderWithOptions low scan limit error = %v, want %v", err, ErrFormat)
+	}
+
+	r, err := NewReaderWithOptions(bytes.NewReader(container), size, ReaderOptions{
+		MaxHeaderScanBytes: int64(len(prefix)),
+	})
+	if err != nil {
+		t.Fatalf("NewReaderWithOptions high scan limit: %v", err)
+	}
+	if got, want := r.BaseOffset(), int64(len(prefix)); got != want {
+		t.Fatalf("BaseOffset = %d, want %d", got, want)
+	}
+}
+
+func TestFindMainHeaderOffsetScanLimitBoundsNonARJInput(t *testing.T) {
+	const scanLimit = int64(64 << 10)
+	size := scanLimit + (8 << 20)
+	rdr := &sparseCountingReaderAt{size: size, fill: 0x11}
+
+	_, err := findMainHeaderOffsetWithBudgetLimitsAndScanLimit(
+		rdr,
+		size,
+		newMainHeaderProbeBudget(size, 0),
+		ParserLimits{},
+		scanLimit,
+	)
+	if !errors.Is(err, ErrFormat) {
+		t.Fatalf("findMainHeaderOffsetWithBudgetLimitsAndScanLimit error = %v, want %v", err, ErrFormat)
+	}
+	if got, max := rdr.totalRead, scanLimit+mainHeaderScanChunkSize; got > max {
+		t.Fatalf("bytes read = %d, want <= %d", got, max)
+	}
+}
+
+func TestFindMainHeaderOffsetScanLimitKeepsBestCandidate(t *testing.T) {
+	real := buildSingleStoreArchive(t, "scan-best.bin", []byte("payload"))
+	prefix := bytes.Repeat([]byte{0x11}, 1024)
+	scanLimit := int64(len(prefix) + len(real) + 16)
+	padLen := int(scanLimit) + 1 - len(prefix) - len(real)
+	if padLen < 0 {
+		t.Fatalf("test setup invalid pad length %d", padLen)
+	}
+
+	container := append(append([]byte(nil), prefix...), real...)
+	container = append(container, bytes.Repeat([]byte{0x11}, padLen)...)
+	container = append(container, arjHeaderID1, arjHeaderID2, 0)
+
+	got, err := findMainHeaderOffsetWithBudgetLimitsAndScanLimit(
+		bytes.NewReader(container),
+		int64(len(container)),
+		newMainHeaderProbeBudget(int64(len(container)), 0),
+		ParserLimits{},
+		scanLimit,
+	)
+	if err != nil {
+		t.Fatalf("findMainHeaderOffsetWithBudgetLimitsAndScanLimit: %v", err)
+	}
+	if want := int64(len(prefix)); got != want {
+		t.Fatalf("findMainHeaderOffsetWithBudgetLimitsAndScanLimit = %d, want %d", got, want)
+	}
+}
+
+func TestNormalizeReaderOptionsAppliesDefaultHeaderScanLimit(t *testing.T) {
+	opts := normalizeReaderOptions(ReaderOptions{})
+	if got, want := opts.MaxHeaderScanBytes, DefaultReaderMaxHeaderScanBytes; got != want {
+		t.Fatalf("MaxHeaderScanBytes = %d, want %d", got, want)
+	}
+}
+
 func TestMainHeaderLegacyCommentAndArchiveName(t *testing.T) {
 	var buf bytes.Buffer
 	w := NewWriter(&buf)
@@ -573,6 +653,30 @@ func (r *countingReaderAt) ReadAt(p []byte, off int64) (int, error) {
 		return 0, io.EOF
 	}
 	n := copy(p, r.data[off:])
+	r.totalRead += int64(n)
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+type sparseCountingReaderAt struct {
+	size      int64
+	fill      byte
+	totalRead int64
+}
+
+func (r *sparseCountingReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 || off >= r.size {
+		return 0, io.EOF
+	}
+	n := len(p)
+	if remain := r.size - off; int64(n) > remain {
+		n = int(remain)
+	}
+	for i := 0; i < n; i++ {
+		p[i] = r.fill
+	}
 	r.totalRead += int64(n)
 	if n < len(p) {
 		return n, io.EOF
