@@ -292,6 +292,25 @@ func TestMultiVolumeWriterAddFS(t *testing.T) {
 	}
 }
 
+func TestMultiVolumeWriterAddFSRejectsOversizedFileBeforeOpen(t *testing.T) {
+	fsys := newOversizedFileFS("huge.bin")
+	archivePath := filepath.Join(t.TempDir(), "oversized-addfs.arj")
+	mw, err := NewMultiVolumeWriter(archivePath, MultiVolumeWriterOptions{VolumeSize: 16 << 10})
+	if err != nil {
+		t.Fatalf("NewMultiVolumeWriter: %v", err)
+	}
+
+	if err := mw.AddFS(fsys); !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("AddFS error = %v, want wrapped %v", err, ErrFileTooLarge)
+	}
+	if fsys.opened {
+		t.Fatalf("AddFS opened oversized source %q", fsys.name)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("Close writer: %v", err)
+	}
+}
+
 func TestMultiVolumeWriterCopyCompressedSizeMismatchAbortsStagedEntry(t *testing.T) {
 	payload := []byte("copy-size-mismatch")
 	srcArchive := buildSingleRawArchive(t, &FileHeader{

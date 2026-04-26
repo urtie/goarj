@@ -1168,6 +1168,22 @@ func TestWriterAddFS(t *testing.T) {
 	}
 }
 
+func TestWriterAddFSRejectsOversizedFileBeforeOpen(t *testing.T) {
+	fsys := newOversizedFileFS("huge.bin")
+
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	if err := w.AddFS(fsys); !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("AddFS error = %v, want wrapped %v", err, ErrFileTooLarge)
+	}
+	if fsys.opened {
+		t.Fatalf("AddFS opened oversized source %q", fsys.name)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close writer: %v", err)
+	}
+}
+
 func TestWriterAddFSSurfacesEntryFinalizeFailure(t *testing.T) {
 	fsys := fstest.MapFS{
 		"bad.txt": {Data: []byte("bad-payload"), Mode: 0o644},
@@ -1667,6 +1683,18 @@ func TestFileInfoHeaderRejectsNegativeSize(t *testing.T) {
 	}
 }
 
+func TestFileInfoHeaderRejectsOversizedFile(t *testing.T) {
+	_, err := FileInfoHeader(stubFileInfo{
+		name:    "oversized.bin",
+		size:    oversizedARJFileSize(),
+		mode:    0o644,
+		modTime: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+	})
+	if !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("FileInfoHeader error = %v, want wrapped %v", err, ErrFileTooLarge)
+	}
+}
+
 func TestHeaderFileInfoSizeOverflowClamp(t *testing.T) {
 	overflow := &FileHeader{
 		Name:               "overflow.bin",
@@ -1698,6 +1726,69 @@ func (fi stubFileInfo) Mode() fs.FileMode  { return fi.mode }
 func (fi stubFileInfo) ModTime() time.Time { return fi.modTime }
 func (fi stubFileInfo) IsDir() bool        { return fi.mode.IsDir() }
 func (fi stubFileInfo) Sys() any           { return nil }
+
+func oversizedARJFileSize() int64 {
+	return int64(maxARJFileSize) + 1
+}
+
+type oversizedFileFS struct {
+	name    string
+	info    fs.FileInfo
+	opened  bool
+	modTime time.Time
+}
+
+func newOversizedFileFS(name string) *oversizedFileFS {
+	fsys := &oversizedFileFS{
+		name:    name,
+		modTime: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+	}
+	fsys.info = stubFileInfo{
+		name:    name,
+		size:    oversizedARJFileSize(),
+		mode:    0o644,
+		modTime: fsys.modTime,
+	}
+	return fsys
+}
+
+func (f *oversizedFileFS) Open(name string) (fs.File, error) {
+	if name == f.name {
+		f.opened = true
+	}
+	return nil, errors.New("test: filesystem content should not be opened")
+}
+
+func (f *oversizedFileFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	if name != "." {
+		return nil, &fs.PathError{Op: "readdir", Path: name, Err: fs.ErrNotExist}
+	}
+	return []fs.DirEntry{oversizedDirEntry{info: f.info}}, nil
+}
+
+func (f *oversizedFileFS) Stat(name string) (fs.FileInfo, error) {
+	if name == "." {
+		return f.rootInfo(), nil
+	}
+	return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrNotExist}
+}
+
+func (f *oversizedFileFS) rootInfo() fs.FileInfo {
+	return stubFileInfo{
+		name:    ".",
+		mode:    fs.ModeDir | 0o755,
+		modTime: f.modTime,
+	}
+}
+
+type oversizedDirEntry struct {
+	info fs.FileInfo
+}
+
+func (d oversizedDirEntry) Name() string               { return d.info.Name() }
+func (d oversizedDirEntry) IsDir() bool                { return d.info.IsDir() }
+func (d oversizedDirEntry) Type() fs.FileMode          { return d.info.Mode().Type() }
+func (d oversizedDirEntry) Info() (fs.FileInfo, error) { return d.info, nil }
 
 func dirEntryNames(entries []fs.DirEntry) []string {
 	names := make([]string, len(entries))

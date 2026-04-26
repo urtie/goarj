@@ -191,6 +191,9 @@ func FileInfoHeader(fi fs.FileInfo) (*FileHeader, error) {
 	if size < 0 {
 		return nil, errors.New("arj: file size cannot be negative")
 	}
+	if uint64(size) > maxARJFileSize {
+		return nil, errFileTooLarge
+	}
 	fh := &FileHeader{
 		Name:               fi.Name(),
 		Method:             Store,

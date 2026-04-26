@@ -88,6 +88,27 @@ func TestRunArchiveExtractSingleFileRoundTrip(t *testing.T) {
 	checkFileContent(t, filepath.Join(outDir, "hello.txt"), "hello file")
 }
 
+func TestAddSingleFileRejectsOversizedFileBeforeOpen(t *testing.T) {
+	sourcePath := filepath.Join(t.TempDir(), "missing-huge.bin")
+	sourceInfo := (&goarj.FileHeader{
+		Name:               "missing-huge.bin",
+		UncompressedSize64: uint64(1) << 32,
+	}).FileInfo()
+
+	var buf bytes.Buffer
+	writer := goarj.NewWriter(&buf)
+	err := addSingleFile(writer, sourcePath, sourceInfo)
+	if !errors.Is(err, goarj.ErrFileTooLarge) {
+		t.Fatalf("addSingleFile error = %v, want wrapped %v", err, goarj.ErrFileTooLarge)
+	}
+	if strings.Contains(err.Error(), "open source") {
+		t.Fatalf("addSingleFile opened oversized source: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close writer: %v", err)
+	}
+}
+
 func TestRunExtractIgnoresSiblingVolumeLikeFiles(t *testing.T) {
 	tmp := t.TempDir()
 
