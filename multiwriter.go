@@ -51,7 +51,7 @@ const (
 	maxCompressedChunkExhaustiveThreshold = 2048
 	maxCompressedChunkProbeBudget         = 48
 	maxCompressedChunkLocalRefineWindow   = 96
-	maxCompressedChunkNativeRefineWindow  = 1 << 10
+	maxCompressedChunkNativeRefineWindow  = 8 << 10
 	multiVolumeCompressedStreamChunkSize  = 64 << 10
 )
 
@@ -1905,6 +1905,27 @@ func nextCompressedChunkProbeSize(bestN, hiN int, bestComp []byte, maxComp int64
 	return n
 }
 
+func initialCompressedChunkProbeSize(fullN int, maxComp int64) int {
+	probeN := 1
+	if maxComp > 0 {
+		candidate := maxComp
+		maxInt := int64(^uint(0) >> 1)
+		if candidate > maxInt {
+			candidate = maxInt
+		}
+		if candidate > 0 {
+			probeN = int(candidate)
+		}
+	}
+	if probeN >= fullN {
+		probeN = fullN - 1
+	}
+	if probeN < 1 {
+		probeN = 1
+	}
+	return probeN
+}
+
 func maxCompressedChunkCanStopRefining(method uint16, plainLen, remainingRange int) bool {
 	// Native methods are expensive to re-run for adjacent lengths. Once the
 	// fitting prefix is within a small window, prefer the known-good chunk over
@@ -2113,23 +2134,7 @@ func (w *MultiVolumeWriter) maxCompressedChunkBufferedWithCompressorAndCRC(
 	}
 	observe(fullN, false)
 
-	probeN := 1
-	if maxComp > 0 {
-		candidate := maxComp
-		maxInt := int64(^uint(0) >> 1)
-		if candidate > maxInt {
-			candidate = maxInt
-		}
-		if candidate > 0 {
-			probeN = int(candidate)
-		}
-	}
-	if probeN >= fullN {
-		probeN = fullN - 1
-	}
-	if probeN < 1 {
-		probeN = 1
-	}
+	probeN := initialCompressedChunkProbeSize(fullN, maxComp)
 
 	probeRes, probeComp, err := probe(probeN)
 	if err != nil {
