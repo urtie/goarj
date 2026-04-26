@@ -110,6 +110,45 @@ func BenchmarkWriterEncodeThroughput(b *testing.B) {
 	}
 }
 
+func BenchmarkWriterEncodeThroughputSeekable(b *testing.B) {
+	for _, sz := range benchmarkSizes {
+		sz := sz
+		payload := benchmarkPayload(sz.size)
+
+		for _, method := range benchmarkMethods {
+			method := method
+			b.Run(sz.name+"/"+method.name, func(b *testing.B) {
+				var archive benchmarkWriteSeeker
+				header := FileHeader{
+					Name:     "payload.bin",
+					Method:   method.method,
+					Modified: benchmarkModifiedTime,
+				}
+
+				b.ReportAllocs()
+				b.SetBytes(int64(len(payload)))
+				b.ResetTimer()
+
+				for i := 0; i < b.N; i++ {
+					archive.Reset()
+
+					w := NewWriter(&archive)
+					fw, err := w.CreateHeader(&header)
+					if err != nil {
+						b.Fatalf("CreateHeader method %d: %v", method.method, err)
+					}
+					if _, err := fw.Write(payload); err != nil {
+						b.Fatalf("Write method %d: %v", method.method, err)
+					}
+					if err := w.Close(); err != nil {
+						b.Fatalf("Close method %d: %v", method.method, err)
+					}
+				}
+			})
+		}
+	}
+}
+
 func BenchmarkWriterEncodeStoreSpillBuffer(b *testing.B) {
 	payload := benchmarkPayload(int(maxInMemoryEntrySpoolSize) + (1 << 20))
 	var archive bytes.Buffer
@@ -159,6 +198,68 @@ func benchmarkReaderFixture(b *testing.B, method uint16, payload []byte) *File {
 		b.Fatalf("header method = %d, want %d", got, method)
 	}
 	return r.File[0]
+}
+
+type benchmarkWriteSeeker struct {
+	buf []byte
+	off int64
+}
+
+func (w *benchmarkWriteSeeker) Reset() {
+	w.buf = w.buf[:0]
+	w.off = 0
+}
+
+func (w *benchmarkWriteSeeker) Write(p []byte) (int, error) {
+	if w.off < 0 {
+		return 0, fmt.Errorf("negative offset")
+	}
+	end := w.off + int64(len(p))
+	if end < w.off {
+		return 0, fmt.Errorf("offset overflow")
+	}
+	if end > int64(len(w.buf)) {
+		if end > int64(cap(w.buf)) {
+			next := make([]byte, end, growBenchmarkWriteSeekerCap(cap(w.buf), int(end)))
+			copy(next, w.buf)
+			w.buf = next
+		} else {
+			w.buf = w.buf[:end]
+		}
+	}
+	copy(w.buf[w.off:end], p)
+	w.off = end
+	return len(p), nil
+}
+
+func (w *benchmarkWriteSeeker) Seek(offset int64, whence int) (int64, error) {
+	var next int64
+	switch whence {
+	case io.SeekStart:
+		next = offset
+	case io.SeekCurrent:
+		next = w.off + offset
+	case io.SeekEnd:
+		next = int64(len(w.buf)) + offset
+	default:
+		return 0, fmt.Errorf("invalid whence %d", whence)
+	}
+	if next < 0 {
+		return 0, fmt.Errorf("negative offset")
+	}
+	w.off = next
+	return next, nil
+}
+
+func growBenchmarkWriteSeekerCap(oldCap, want int) int {
+	next := oldCap
+	if next == 0 {
+		next = 1024
+	}
+	for next < want {
+		next *= 2
+	}
+	return next
 }
 
 func benchmarkArchiveBytes(b *testing.B, method uint16, payload []byte) []byte {

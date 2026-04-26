@@ -34,6 +34,14 @@ Extract an archive:
 go run ./cmd/goarj extract backup.arj ./out
 ```
 
+## Performance notes
+
+ARJ local headers store entry sizes before the entry payload. When `NewWriter`
+receives a plain `io.Writer`, goarj must buffer each compressed entry until the
+size and CRC are known. Passing an `io.WriteSeeker` such as `*os.File` lets the
+writer stream payload bytes and patch the local header in place, which avoids
+the per-entry compressed buffer on large writes.
+
 ## Quick usage
 
 ### Write an archive
