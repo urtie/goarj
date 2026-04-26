@@ -571,12 +571,13 @@ func (f *File) openSegment(segment fileSegment, password []byte) (io.ReadCloser,
 }
 
 type checksumReader struct {
-	rc      io.ReadCloser
-	crc     uint32
-	readN   uint64
-	wantN   uint64
-	wantCRC uint32
-	err     error
+	rc       io.ReadCloser
+	crc      uint32
+	readN    uint64
+	wantN    uint64
+	wantCRC  uint32
+	err      error
+	verified bool
 }
 
 func (r *checksumReader) Read(p []byte) (int, error) {
@@ -589,15 +590,17 @@ func (r *checksumReader) Read(p []byte) (int, error) {
 		r.crc = crc32.Update(r.crc, crc32.IEEETable, p[:n])
 		r.readN += uint64(n)
 	}
+	if r.readN > r.wantN {
+		r.err = ErrFormat
+		return n, r.err
+	}
 	if err == io.EOF {
-		if r.readN != r.wantN {
-			r.err = ErrFormat
-			return n, r.err
+		if verifyErr := r.verify(); verifyErr != nil {
+			return n, verifyErr
 		}
-		if r.crc != r.wantCRC {
-			r.err = ErrChecksum
-			return n, r.err
-		}
+	} else if err != nil {
+		r.err = err
+		return n, r.err
 	}
 	return n, err
 }
@@ -609,7 +612,39 @@ func (r *checksumReader) Close() error {
 	if r.rc == nil {
 		return nil
 	}
-	return r.rc.Close()
+	var verifyErr error
+	if r.err == nil && !r.verified {
+		verifyErr = r.drainAndVerify()
+	}
+	closeErr := r.rc.Close()
+	return errors.Join(verifyErr, closeErr)
+}
+
+func (r *checksumReader) drainAndVerify() error {
+	var buf [32 * 1024]byte
+	for r.err == nil && !r.verified {
+		_, err := r.Read(buf[:])
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return r.err
+}
+
+func (r *checksumReader) verify() error {
+	if r.readN != r.wantN {
+		r.err = ErrFormat
+		return r.err
+	}
+	if r.crc != r.wantCRC {
+		r.err = ErrChecksum
+		return r.err
+	}
+	r.verified = true
+	return nil
 }
 
 type garbledReaderCloser struct {

@@ -2,6 +2,7 @@ package arj
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -446,6 +447,73 @@ func TestChecksumReaderDetectsTruncationReadCountMismatch(t *testing.T) {
 	if string(got) != "abc" {
 		t.Fatalf("ReadAll payload = %q, want %q", got, "abc")
 	}
+}
+
+func TestChecksumReaderCloseVerifiesExactSizeRead(t *testing.T) {
+	archive := buildSingleStoreArchive(t, "corrupt.bin", []byte("abcd"))
+	r, err := NewReader(bytes.NewReader(archive), int64(len(archive)))
+	if err != nil {
+		t.Fatalf("NewReader original: %v", err)
+	}
+	off, err := r.File[0].DataOffset()
+	if err != nil {
+		t.Fatalf("DataOffset: %v", err)
+	}
+
+	corrupt := append([]byte(nil), archive...)
+	corrupt[off] ^= 0xff
+
+	r, err = NewReader(bytes.NewReader(corrupt), int64(len(corrupt)))
+	if err != nil {
+		t.Fatalf("NewReader corrupt: %v", err)
+	}
+	rc, err := r.File[0].Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	buf := make([]byte, r.File[0].UncompressedSize64)
+	if n, err := io.ReadFull(rc, buf); err != nil || n != len(buf) {
+		t.Fatalf("ReadFull = (%d, %v), want (%d, nil)", n, err, len(buf))
+	}
+	if err := rc.Close(); !errors.Is(err, ErrChecksum) {
+		t.Fatalf("Close error = %v, want %v", err, ErrChecksum)
+	}
+}
+
+func TestChecksumReaderCloseDetectsOverlongExactSizeRead(t *testing.T) {
+	payload := []byte("abcd")
+	archive := buildSingleStoreArchive(t, "overlong.bin", payload)
+	mutated := mutateFirstLocalHeaderUncompressedSizeAndCRC(t, archive, 3, crc32.ChecksumIEEE(payload[:3]))
+
+	r, err := NewReader(bytes.NewReader(mutated), int64(len(mutated)))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	rc, err := r.File[0].Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	buf := make([]byte, r.File[0].UncompressedSize64)
+	if n, err := io.ReadFull(rc, buf); err != nil || n != len(buf) {
+		t.Fatalf("ReadFull = (%d, %v), want (%d, nil)", n, err, len(buf))
+	}
+	if string(buf) != string(payload[:3]) {
+		t.Fatalf("ReadFull payload = %q, want %q", buf, payload[:3])
+	}
+	if err := rc.Close(); !errors.Is(err, ErrFormat) {
+		t.Fatalf("Close error = %v, want %v", err, ErrFormat)
+	}
+}
+
+func mutateFirstLocalHeaderUncompressedSizeAndCRC(t *testing.T, archive []byte, uncompressedSize, crc uint32) []byte {
+	t.Helper()
+
+	out := append([]byte(nil), archive...)
+	basicStart, basicEnd := firstLocalHeaderBasicBounds(t, out)
+	binary.LittleEndian.PutUint32(out[basicStart+16:basicStart+20], uncompressedSize)
+	binary.LittleEndian.PutUint32(out[basicStart+20:basicStart+24], crc)
+	binary.LittleEndian.PutUint32(out[basicEnd:basicEnd+4], crc32.ChecksumIEEE(out[basicStart:basicEnd]))
+	return out
 }
 
 func buildSingleRawArchive(t *testing.T, hdr *FileHeader, payload []byte) []byte {
