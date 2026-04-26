@@ -215,11 +215,27 @@ func TestReaderFSIndexReflectsMutatedFileNames(t *testing.T) {
 		t.Fatalf("Open(a.txt): %v", err)
 	}
 	_ = f.Close()
+	firstIndex := r.fsIndex
+	if firstIndex == nil {
+		t.Fatalf("fs index was not cached after Open")
+	}
+
+	f, err = r.Open("a.txt")
+	if err != nil {
+		t.Fatalf("Open(a.txt) cached: %v", err)
+	}
+	_ = f.Close()
+	if r.fsIndex != firstIndex {
+		t.Fatalf("fs index was rebuilt without a file-header mutation")
+	}
 
 	r.File[0].Name = "b.txt"
 
 	if _, err := r.Open("a.txt"); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("Open(a.txt) after rename error = %v, want %v", err, fs.ErrNotExist)
+	}
+	if r.fsIndex == firstIndex {
+		t.Fatalf("fs index was not rebuilt after file-header mutation")
 	}
 
 	renamed, err := r.Open("b.txt")

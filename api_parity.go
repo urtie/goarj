@@ -88,8 +88,11 @@ type dirEntryCandidate struct {
 }
 
 type readerFSIndex struct {
-	files map[string]*File
-	dirs  map[string]readerDirIndex
+	files       map[string]*File
+	dirs        map[string]readerDirIndex
+	sourceFiles []*File
+	sourceNames []string
+	sourceTypes []uint8
 }
 
 type readerDirIndex struct {
@@ -167,19 +170,61 @@ func ensureAncestorDirs(dirByName map[string]*FileHeader, name string, files map
 }
 
 func (r *Reader) fsIndexSnapshot() *readerFSIndex {
-	// Reader.File and nested FileHeader fields are exported, so callers can
-	// legitimately mutate them after a Reader is constructed. Rebuild the FS
-	// view from current state instead of caching a stale index.
 	r.stateMu.RLock()
+	if r.fsIndex != nil && r.fsIndex.matches(r.File) {
+		idx := r.fsIndex
+		r.stateMu.RUnlock()
+		return idx
+	}
 	files := append([]*File(nil), r.File...)
 	r.stateMu.RUnlock()
-	return buildReaderFSIndex(files)
+
+	idx := buildReaderFSIndex(files)
+	r.stateMu.Lock()
+	r.fsIndex = idx
+	r.stateMu.Unlock()
+	return idx
+}
+
+func (idx *readerFSIndex) matches(files []*File) bool {
+	if idx == nil || len(files) != len(idx.sourceFiles) {
+		return false
+	}
+	for i, f := range files {
+		if f != idx.sourceFiles[i] {
+			return false
+		}
+		name := ""
+		fileType := uint8(0)
+		if f != nil {
+			name = f.Name
+			fileType = f.fileType
+		}
+		if name != idx.sourceNames[i] || fileType != idx.sourceTypes[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func buildReaderFSIndex(files []*File) *readerFSIndex {
+	sourceFiles := append([]*File(nil), files...)
+	sourceNames := make([]string, len(files))
+	sourceTypes := make([]uint8, len(files))
+	for i, f := range files {
+		if f == nil {
+			continue
+		}
+		sourceNames[i] = f.Name
+		sourceTypes[i] = f.fileType
+	}
+
 	fileByName := make(map[string]*File, len(files))
 	explicitDirs := make(map[string]*FileHeader, len(files))
 	for _, f := range files {
+		if f == nil {
+			continue
+		}
 		fullName := strings.TrimSuffix(f.Name, "/")
 		if fullName == "" || fullName == "." || !fs.ValidPath(fullName) {
 			continue
@@ -263,8 +308,11 @@ func buildReaderFSIndex(files []*File) *readerFSIndex {
 	}
 
 	return &readerFSIndex{
-		files: fileByName,
-		dirs:  dirs,
+		files:       fileByName,
+		dirs:        dirs,
+		sourceFiles: sourceFiles,
+		sourceNames: sourceNames,
+		sourceTypes: sourceTypes,
 	}
 }
 
