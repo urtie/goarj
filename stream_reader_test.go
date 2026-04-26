@@ -222,6 +222,43 @@ func TestNewStreamReaderSkipsLeadingPrefix(t *testing.T) {
 	}
 }
 
+func TestNewStreamReaderWithOptionsMaxHeaderScanBytes(t *testing.T) {
+	archive := buildStreamArchive(t, []streamTestEntry{
+		{
+			header:  FileHeader{Name: "file.txt", Method: Store},
+			payload: []byte("ok"),
+		},
+	})
+	prefix := bytes.Repeat([]byte{0x7f}, 128)
+	stream := append(append([]byte(nil), prefix...), archive...)
+
+	_, err := NewStreamReaderWithOptions(bytes.NewReader(stream), StreamReaderOptions{
+		MaxHeaderScanBytes: int64(len(prefix) - 1),
+	})
+	if !errors.Is(err, ErrStreamHeaderScanLimitExceeded) {
+		t.Fatalf("NewStreamReaderWithOptions error = %v, want %v", err, ErrStreamHeaderScanLimitExceeded)
+	}
+
+	sr, err := NewStreamReaderWithOptions(bytes.NewReader(stream), StreamReaderOptions{
+		MaxHeaderScanBytes: int64(len(prefix)),
+	})
+	if err != nil {
+		t.Fatalf("NewStreamReaderWithOptions: %v", err)
+	}
+	if got, want := sr.BaseOffset(), int64(len(prefix)); got != want {
+		t.Fatalf("BaseOffset = %d, want %d", got, want)
+	}
+}
+
+func TestNewStreamReaderWithOptionsRejectsNegativeMaxHeaderScanBytes(t *testing.T) {
+	_, err := NewStreamReaderWithOptions(bytes.NewReader(nil), StreamReaderOptions{
+		MaxHeaderScanBytes: -1,
+	})
+	if !errors.Is(err, ErrInvalidStreamHeaderScanLimit) {
+		t.Fatalf("NewStreamReaderWithOptions error = %v, want %v", err, ErrInvalidStreamHeaderScanLimit)
+	}
+}
+
 func TestNewStreamReaderSkipsInvalidSignatureCandidates(t *testing.T) {
 	archive := buildStreamArchive(t, []streamTestEntry{
 		{

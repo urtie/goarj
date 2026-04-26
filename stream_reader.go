@@ -2,6 +2,7 @@ package arj
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
@@ -10,10 +11,23 @@ import (
 	"sync"
 )
 
+const streamHeaderScanChunkSize = 32 << 10
+
 // StreamReaderOptions configures NewStreamReaderWithOptions.
 type StreamReaderOptions struct {
 	ParserLimits ParserLimits
+	// MaxHeaderScanBytes limits how many leading bytes may be scanned while
+	// looking for the main ARJ header. Zero means unlimited.
+	MaxHeaderScanBytes int64
 }
+
+var (
+	// ErrInvalidStreamHeaderScanLimit indicates an invalid stream header scan limit.
+	ErrInvalidStreamHeaderScanLimit = errors.New("arj: stream header scan limit must be >= 0")
+	// ErrStreamHeaderScanLimitExceeded indicates a stream header was not found
+	// within StreamReaderOptions.MaxHeaderScanBytes.
+	ErrStreamHeaderScanLimitExceeded = errors.New("arj: stream header scan limit exceeded")
+)
 
 // A StreamReader serves ARJ content sequentially from an io.Reader.
 type StreamReader struct {
@@ -46,14 +60,17 @@ func NewStreamReaderWithOptions(r io.Reader, opts StreamReaderOptions) (*StreamR
 	if r == nil {
 		return nil, ErrFormat
 	}
+	if opts.MaxHeaderScanBytes < 0 {
+		return nil, ErrInvalidStreamHeaderScanLimit
+	}
 	if err := validateParserLimits(opts.ParserLimits); err != nil {
 		return nil, err
 	}
 
 	limits := normalizeParserLimits(opts.ParserLimits)
-	br := bufio.NewReader(r)
+	br := bufio.NewReaderSize(r, streamHeaderScanChunkSize+arjMaxBasicHeaderSize+6)
 
-	baseOffset, err := scanToHeaderSignature(br)
+	baseOffset, err := scanToHeaderSignature(br, opts.MaxHeaderScanBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -204,39 +221,76 @@ func (r *StreamReader) Next() (*FileHeader, io.ReadCloser, error) {
 	return &entry.header, entry, nil
 }
 
-func scanToHeaderSignature(r *bufio.Reader) (int64, error) {
-	var (
-		off      int64
-		havePrev bool
-		prev     byte
-	)
+func scanToHeaderSignature(r *bufio.Reader, maxScanBytes int64) (int64, error) {
+	signature := []byte{arjHeaderID1, arjHeaderID2}
+	var off int64
 	for {
-		b, err := r.ReadByte()
+		if maxScanBytes > 0 && off > maxScanBytes {
+			return 0, ErrStreamHeaderScanLimitExceeded
+		}
+		if _, err := r.Peek(len(signature)); err != nil {
+			return 0, normalizeHeaderReadError(err)
+		}
+
+		n := r.Buffered()
+		if n > streamHeaderScanChunkSize {
+			n = streamHeaderScanChunkSize
+		}
+		chunk, err := r.Peek(n)
 		if err != nil {
 			return 0, normalizeHeaderReadError(err)
 		}
-		off++
-		if havePrev && prev == arjHeaderID1 && b == arjHeaderID2 {
-			sizeBytes, err := r.Peek(2)
+
+		for i := 0; i < len(chunk)-1; {
+			next := bytes.Index(chunk[i:], signature)
+			if next < 0 {
+				break
+			}
+			pos := i + next
+			candidateOff := off + int64(pos)
+			if maxScanBytes > 0 && candidateOff > maxScanBytes {
+				return 0, ErrStreamHeaderScanLimitExceeded
+			}
+			if pos+3 < len(chunk) {
+				basicSize := int(binary.LittleEndian.Uint16(chunk[pos+2 : pos+4]))
+				if basicSize < arjMinFirstHeaderSize || basicSize > arjMaxBasicHeaderSize {
+					i = pos + 1
+					continue
+				}
+			}
+			headerPrefix, err := r.Peek(pos + len(signature) + 2)
 			if err != nil {
 				return 0, normalizeHeaderReadError(err)
 			}
+			sizeBytes := headerPrefix[pos+len(signature) : pos+len(signature)+2]
 			basicSize := int(binary.LittleEndian.Uint16(sizeBytes))
 			if basicSize >= arjMinFirstHeaderSize && basicSize <= arjMaxBasicHeaderSize {
 				const crcSize = 4
-				candidateBytes, err := r.Peek(2 + basicSize + crcSize)
+				candidateBytes, err := r.Peek(pos + len(signature) + 2 + basicSize + crcSize)
 				if err != nil {
 					return 0, normalizeHeaderReadError(err)
 				}
-				basic := candidateBytes[2 : 2+basicSize]
-				wantCRC := binary.LittleEndian.Uint32(candidateBytes[2+basicSize : 2+basicSize+crcSize])
+				basicStart := pos + len(signature) + 2
+				basic := candidateBytes[basicStart : basicStart+basicSize]
+				wantCRC := binary.LittleEndian.Uint32(candidateBytes[basicStart+basicSize : basicStart+basicSize+crcSize])
 				if crc32.ChecksumIEEE(basic) == wantCRC && probeMainHeaderBasicValid(basic) {
-					return off - 2, nil
+					if _, err := r.Discard(pos + len(signature)); err != nil {
+						return 0, normalizeHeaderReadError(err)
+					}
+					return candidateOff, nil
 				}
 			}
+			i = pos + 1
 		}
-		havePrev = true
-		prev = b
+
+		discard := len(chunk) - 1
+		if maxScanBytes > 0 && off+int64(discard) > maxScanBytes {
+			return 0, ErrStreamHeaderScanLimitExceeded
+		}
+		if _, err := r.Discard(discard); err != nil {
+			return 0, normalizeHeaderReadError(err)
+		}
+		off += int64(discard)
 	}
 }
 
