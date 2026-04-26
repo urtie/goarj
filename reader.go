@@ -757,6 +757,14 @@ func findMainHeaderOffsetWithBudgetAndLimits(r io.ReaderAt, size int64, budget *
 	scanReader := r
 	probeReader := &budgetedReaderAt{r: r, budget: budget}
 
+	files, end, ok, probeErr := probeArchiveLayoutWithLimits(probeReader, size, 0, limits)
+	if probeErr != nil {
+		return 0, normalizeMainHeaderProbeError(probeErr)
+	}
+	if ok && (files > 0 || end == size) {
+		return 0, nil
+	}
+
 	buf := mainHeaderScanBufPool.Get().([]byte)
 	defer mainHeaderScanBufPool.Put(buf)
 	signature := [2]byte{arjHeaderID1, arjHeaderID2}

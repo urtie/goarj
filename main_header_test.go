@@ -186,8 +186,28 @@ func TestFindMainHeaderOffsetProbeBudgetIgnoresScanBytesWithoutCandidates(t *tes
 	if !errors.Is(err, ErrFormat) {
 		t.Fatalf("findMainHeaderOffsetWithBudget error = %v, want %v", err, ErrFormat)
 	}
-	if got, want := rdr.totalRead, int64(len(noise)); got != want {
+	if got, want := rdr.totalRead, int64(len(noise))+4; got != want {
 		t.Fatalf("bytes read = %d, want %d", got, want)
+	}
+}
+
+func TestFindMainHeaderOffsetFastPathRegularArchive(t *testing.T) {
+	archive := buildSingleStoreArchive(t, "fast-path.bin", bytes.Repeat([]byte{'x'}, 4<<20))
+	rdr := &countingReaderAt{data: archive}
+
+	got, err := findMainHeaderOffsetWithBudget(
+		rdr,
+		int64(len(archive)),
+		&mainHeaderProbeBudget{remaining: int64(len(archive)) * 2},
+	)
+	if err != nil {
+		t.Fatalf("findMainHeaderOffsetWithBudget: %v", err)
+	}
+	if got != 0 {
+		t.Fatalf("findMainHeaderOffsetWithBudget = %d, want 0", got)
+	}
+	if maxRead := int64(len(archive)) / 4; rdr.totalRead >= maxRead {
+		t.Fatalf("bytes read = %d, want < %d", rdr.totalRead, maxRead)
 	}
 }
 
