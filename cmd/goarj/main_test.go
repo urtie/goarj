@@ -163,6 +163,71 @@ func TestRunArchiveRejectsArchiveInsideSourceDirectory(t *testing.T) {
 	}
 }
 
+func TestRunArchiveRejectsArchiveSymlinkToSourceFile(t *testing.T) {
+	tmp := t.TempDir()
+
+	sourceDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll source: %v", err)
+	}
+	sourceFile := filepath.Join(sourceDir, "file.txt")
+	const original = "payload"
+	if err := os.WriteFile(sourceFile, []byte(original), 0o644); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+
+	archivePath := filepath.Join(tmp, "archive.arj")
+	symlinkOrSkip(t, sourceFile, archivePath)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run([]string{"archive", archivePath, sourceDir}, &stdout, &stderr)
+	if err == nil {
+		t.Fatalf("run archive error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "must not be a symlink") {
+		t.Fatalf("run archive error = %q, want symlink rejection", err)
+	}
+	checkFileContent(t, sourceFile, original)
+
+	info, statErr := os.Lstat(archivePath)
+	if statErr != nil {
+		t.Fatalf("Lstat archive symlink: %v", statErr)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("archive path mode = %v, want symlink", info.Mode())
+	}
+}
+
+func TestRunArchiveRejectsArchiveThroughSymlinkedParentInsideSourceDirectory(t *testing.T) {
+	tmp := t.TempDir()
+
+	sourceDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll source: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "file.txt"), []byte("payload"), 0o644); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+
+	parentLink := filepath.Join(tmp, "source-link")
+	symlinkOrSkip(t, sourceDir, parentLink)
+	archivePath := filepath.Join(parentLink, "archive.arj")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run([]string{"archive", archivePath, sourceDir}, &stdout, &stderr)
+	if err == nil {
+		t.Fatalf("run archive error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "outside source directory") {
+		t.Fatalf("run archive error = %q, want outside-source-directory message", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(sourceDir, "archive.arj")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("archive path stat error = %v, want %v", statErr, os.ErrNotExist)
+	}
+}
+
 func TestRunArchiveRejectsArchivePathEqualToSourceFile(t *testing.T) {
 	tmp := t.TempDir()
 
@@ -213,6 +278,13 @@ func TestRunUsageErrors(t *testing.T) {
 				t.Fatalf("usage output missing; err=%q stdout=%q stderr=%q", err, stdout.String(), stderr.String())
 			}
 		})
+	}
+}
+
+func symlinkOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("Symlink not supported in this environment: %v", err)
 	}
 }
 

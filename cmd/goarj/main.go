@@ -92,9 +92,17 @@ func validateArchiveDestinationPath(archivePath, sourcePath string, sourceInfo f
 	if err != nil {
 		return fmt.Errorf("resolve source path %q: %w", sourcePath, err)
 	}
+	resolvedSourcePath, err := filepath.EvalSymlinks(absSourcePath)
+	if err != nil {
+		return fmt.Errorf("resolve source path %q: %w", sourcePath, err)
+	}
+	resolvedArchivePath, err := resolveArchiveDestinationPath(absArchivePath)
+	if err != nil {
+		return err
+	}
 
 	if sourceInfo.IsDir() {
-		insideSource, err := pathContains(absSourcePath, absArchivePath)
+		insideSource, err := pathContains(resolvedSourcePath, resolvedArchivePath)
 		if err != nil {
 			return fmt.Errorf("compare archive/source paths: %w", err)
 		}
@@ -104,11 +112,11 @@ func validateArchiveDestinationPath(archivePath, sourcePath string, sourceInfo f
 		return nil
 	}
 
-	if absArchivePath == absSourcePath {
+	if resolvedArchivePath == resolvedSourcePath {
 		return fmt.Errorf("archive path %q must differ from source file %q", archivePath, sourcePath)
 	}
 
-	archiveInfo, err := os.Stat(absArchivePath)
+	archiveInfo, err := os.Stat(resolvedArchivePath)
 	if err == nil {
 		if os.SameFile(sourceInfo, archiveInfo) {
 			return fmt.Errorf("archive path %q resolves to source file %q", archivePath, sourcePath)
@@ -119,6 +127,30 @@ func validateArchiveDestinationPath(archivePath, sourcePath string, sourceInfo f
 		return fmt.Errorf("stat archive %q: %w", archivePath, err)
 	}
 	return nil
+}
+
+func resolveArchiveDestinationPath(absArchivePath string) (string, error) {
+	info, err := os.Lstat(absArchivePath)
+	if err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("archive path %q must not be a symlink", absArchivePath)
+		}
+		resolved, err := filepath.EvalSymlinks(absArchivePath)
+		if err != nil {
+			return "", fmt.Errorf("resolve archive path %q: %w", absArchivePath, err)
+		}
+		return filepath.Clean(resolved), nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("stat archive %q: %w", absArchivePath, err)
+	}
+
+	parent := filepath.Dir(absArchivePath)
+	resolvedParent, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		return "", fmt.Errorf("resolve archive parent %q: %w", parent, err)
+	}
+	return filepath.Join(resolvedParent, filepath.Base(absArchivePath)), nil
 }
 
 func pathContains(rootPath, path string) (bool, error) {

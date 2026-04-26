@@ -152,9 +152,12 @@ func ExtractAllStream(r io.Reader, dir string) error {
 }
 
 // ExtractAllStreamWithOptions extracts all entries from an ARJ stream under
-// dir with configurable limits.
+// dir with configurable extraction limits. The initial stream header search is
+// capped at DefaultReaderMaxHeaderScanBytes.
 func ExtractAllStreamWithOptions(r io.Reader, dir string, opts ExtractOptions) error {
-	sr, err := NewStreamReader(r)
+	sr, err := NewStreamReaderWithOptions(r, StreamReaderOptions{
+		MaxHeaderScanBytes: DefaultReaderMaxHeaderScanBytes,
+	})
 	if err != nil {
 		return err
 	}

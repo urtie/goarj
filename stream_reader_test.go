@@ -967,6 +967,22 @@ func TestExtractAllStreamPreOpenQuotaCheckBeforeDecompressorPath(t *testing.T) {
 	}
 }
 
+func TestExtractAllStreamWithOptionsUsesDefaultHeaderScanLimit(t *testing.T) {
+	err := ExtractAllStreamWithOptions(infiniteZeroReader{}, filepath.Join(t.TempDir(), "out"), UnlimitedExtractOptions())
+	if !errors.Is(err, ErrStreamHeaderScanLimitExceeded) {
+		t.Fatalf("ExtractAllStreamWithOptions error = %v, want %v", err, ErrStreamHeaderScanLimitExceeded)
+	}
+}
+
+type infiniteZeroReader struct{}
+
+func (infiniteZeroReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
+}
+
 func TestExtractAllStreamRejectsInsecurePath(t *testing.T) {
 	archive := buildStreamArchive(t, []streamTestEntry{
 		{
