@@ -52,7 +52,7 @@ const (
 	maxCompressedChunkProbeBudget         = 48
 	maxCompressedChunkLocalRefineWindow   = 96
 	maxCompressedChunkNativeRefineWindow  = 8 << 10
-	multiVolumeCompressedStreamChunkSize  = 64 << 10
+	multiVolumeCompressedPendingLimit     = DefaultMaxPlainEntryBufferSize
 )
 
 // MultiVolumeWriterOptions configures NewMultiVolumeWriter.
@@ -156,6 +156,14 @@ func (w *MultiVolumeWriter) Parts() []string {
 func (w *MultiVolumeWriter) Flush() error {
 	if w.failed != nil {
 		return w.failed
+	}
+	if w.last != nil && !w.last.isClosed() {
+		if flusher, ok := w.last.(interface{ flush() error }); ok {
+			if err := flusher.flush(); err != nil {
+				w.latchFailure(err)
+				return err
+			}
+		}
 	}
 	if w.current == nil {
 		return nil
@@ -391,7 +399,7 @@ func (w *MultiVolumeWriter) CreateHeader(fh *FileHeader) (io.Writer, error) {
 			h:                  &h,
 			compressor:         comp,
 			method14InputLimit: limits.MaxMethod14InputBufferSize,
-			chunkSize:          multiVolumeCompressedStreamChunkSize,
+			pendingLimit:       multiVolumeCompressedPendingLimit,
 		}
 		w.last = cw
 		return cw, nil
@@ -796,11 +804,13 @@ type multiVolumeCompressedFileWriter struct {
 	h                  *FileHeader
 	compressor         Compressor
 	method14InputLimit uint64
-	chunkSize          int
 	plainN             uint64
 	resumePos          uint64
 	continued          bool
 	lastSegment        *multiVolumeCompressedSegment
+	pending            *entryBuffer
+	pendingOff         uint64
+	pendingLimit       uint64
 	writeErr           error
 	closed             bool
 }
@@ -831,14 +841,38 @@ func (w *multiVolumeCompressedFileWriter) Write(p []byte) (int, error) {
 			w.latchWriteErr(sizeErr)
 			return total, sizeErr
 		}
+		if err := w.compactPending(); err != nil {
+			w.latchWriteErr(err)
+			return total, err
+		}
+		if isNativeMethod14(w.h.Method) && w.pendingUnread() != 0 && w.pendingUnread()+uint64(len(p)) > w.method14InputLimit {
+			if err := w.flushPending(true); err != nil {
+				w.latchWriteErr(err)
+				return total, err
+			}
+			continue
+		}
 
 		chunkN := len(p)
-		if w.chunkSize > 0 && chunkN > w.chunkSize {
-			chunkN = w.chunkSize
-		}
 		remaining := maxARJFileSize - w.plainN
 		if uint64(chunkN) > remaining {
 			chunkN = int(remaining)
+		}
+		pendingRoom := w.pendingLimitOrDefault() - w.pendingUnread()
+		if pendingRoom == 0 {
+			if err := w.flushPendingForWrite(); err != nil {
+				w.latchWriteErr(err)
+				return total, err
+			}
+			continue
+		}
+		if uint64(chunkN) > pendingRoom {
+			chunkN = int(pendingRoom)
+		}
+		if isNativeMethod14(w.h.Method) && w.pendingUnread() == 0 && uint64(chunkN) > w.method14InputLimit {
+			limitErr := w.method14InputLimitErr(chunkN)
+			w.latchWriteErr(limitErr)
+			return total, limitErr
 		}
 		if chunkN <= 0 {
 			sizeErr := errFileTooLarge
@@ -846,102 +880,294 @@ func (w *multiVolumeCompressedFileWriter) Write(p []byte) (int, error) {
 			return total, sizeErr
 		}
 
-		consumed, err := w.writeChunk(p[:chunkN])
-		total += consumed
-		p = p[consumed:]
+		consumed, err := w.writePending(p[:chunkN])
+		if consumed > 0 {
+			w.plainN += uint64(consumed)
+			total += consumed
+			p = p[consumed:]
+		}
 		if err != nil {
 			w.latchWriteErr(err)
 			return total, err
 		}
 		if consumed < chunkN {
+			w.latchWriteErr(io.ErrShortWrite)
 			return total, io.ErrShortWrite
 		}
-	}
-
-	return total, nil
-}
-
-func (w *multiVolumeCompressedFileWriter) writeChunk(chunk []byte) (int, error) {
-	total := 0
-	for len(chunk) > 0 {
-		n, err := w.writeSegmentFromPrefix(chunk)
-		total += n
-		chunk = chunk[n:]
-		if err != nil {
+		if err := w.flushPendingForWrite(); err != nil {
+			w.latchWriteErr(err)
 			return total, err
 		}
-		if n == 0 {
-			return total, io.ErrShortWrite
-		}
 	}
+
 	return total, nil
 }
 
-func (w *multiVolumeCompressedFileWriter) writeSegmentFromPrefix(plain []byte) (int, error) {
-	if len(plain) == 0 {
-		return 0, nil
+func (w *multiVolumeCompressedFileWriter) flush() error {
+	if w.closed {
+		return nil
 	}
-	method := w.h.Method
+	if w.writeErr != nil {
+		return w.writeErr
+	}
+	if err := w.flushPending(true); err != nil {
+		w.latchWriteErr(err)
+		return err
+	}
+	return nil
+}
+
+func (w *multiVolumeCompressedFileWriter) flushPendingForWrite() error {
+	for {
+		unread := w.pendingUnread()
+		if unread == 0 {
+			return nil
+		}
+		force := unread >= w.pendingLimitOrDefault()
+		if isNativeMethod14(w.h.Method) && unread > w.method14InputLimit {
+			force = true
+		}
+		if !force {
+			maxComp, err := w.prospectiveSegmentMaxComp()
+			if err != nil {
+				return err
+			}
+			if maxComp > 0 && unread < uint64(maxComp) {
+				return nil
+			}
+		}
+
+		wrote, err := w.writePendingSegment(force)
+		if err != nil {
+			return err
+		}
+		if !wrote {
+			return nil
+		}
+	}
+}
+
+func (w *multiVolumeCompressedFileWriter) flushPending(force bool) error {
+	for w.pendingUnread() > 0 {
+		wrote, err := w.writePendingSegment(force)
+		if err != nil {
+			return err
+		}
+		if !wrote {
+			if force {
+				return io.ErrShortWrite
+			}
+			return nil
+		}
+	}
+	return nil
+}
+
+func (w *multiVolumeCompressedFileWriter) writePendingSegment(force bool) (bool, error) {
+	unread := w.pendingUnread()
+	if unread == 0 {
+		return false, nil
+	}
+
+	if !force {
+		maxComp, err := w.prospectiveSegmentMaxComp()
+		if err != nil {
+			return false, err
+		}
+		if maxComp > 0 {
+			n, _, _, err := w.selectPendingSegment(maxComp)
+			if err != nil {
+				return false, err
+			}
+			if uint64(n) == unread {
+				return false, nil
+			}
+		}
+	}
 
 	for {
 		if w.lastSegment != nil {
 			if err := w.w.closeCurrentVolume(true); err != nil {
-				return 0, err
+				return false, err
 			}
 			w.lastSegment = nil
 		}
 		if err := w.w.ensureCurrentVolume(); err != nil {
-			return 0, err
+			return false, err
 		}
 
 		h, err := w.segmentHeaderTemplate(true)
 		if err != nil {
-			return 0, err
+			return false, err
 		}
 		overhead, err := rawSegmentOverhead(&h)
 		if err != nil {
-			return 0, err
+			return false, err
 		}
 
 		maxComp := w.w.currentRemaining() - int64(overhead)
 		if maxComp <= 0 {
 			if !w.w.currentHasEntries {
-				return 0, w.w.volumeTooSmallOnEmptyCurrent()
+				return false, w.w.volumeTooSmallOnEmptyCurrent()
 			}
 			w.lastSegment = nil
 			if err := w.w.closeCurrentVolume(true); err != nil {
-				return 0, err
+				return false, err
 			}
 			continue
 		}
 
-		n, comp, err := w.w.maxCompressedChunkWithCompressor(method, plain, maxComp, w.compressor, w.method14InputLimit)
+		n, comp, crc, err := w.selectPendingSegment(maxComp)
 		if err != nil {
-			return 0, err
+			return false, err
 		}
 		if n == 0 {
 			if !w.w.currentHasEntries {
-				return 0, w.w.volumeTooSmallOnEmptyCurrent()
+				return false, w.w.volumeTooSmallOnEmptyCurrent()
 			}
 			w.lastSegment = nil
 			if err := w.w.closeCurrentVolume(true); err != nil {
-				return 0, err
+				return false, err
 			}
 			continue
 		}
-		if n > len(plain) {
-			return 0, io.ErrUnexpectedEOF
+		if uint64(n) > unread {
+			return false, io.ErrUnexpectedEOF
 		}
-		if uint64(n) > maxARJFileSize-w.plainN {
-			return 0, errFileTooLarge
+		if !force && uint64(n) == unread {
+			return false, nil
 		}
 
-		crc := crc32.ChecksumIEEE(plain[:n])
 		if err := w.writeSegment(h, uint64(n), comp, crc); err != nil {
+			return false, err
+		}
+		w.pendingOff += uint64(n)
+		if err := w.closePendingIfDrained(); err != nil {
+			return true, err
+		}
+		return true, nil
+	}
+}
+
+func (w *multiVolumeCompressedFileWriter) writePending(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if w.pending == nil {
+		w.pending = newEntryBuffer(w.pendingLimitOrDefault(), bufferScopeMultiEntryPlain)
+	}
+	return w.pending.Write(p)
+}
+
+func (w *multiVolumeCompressedFileWriter) compactPending() error {
+	if w.pending == nil || w.pendingOff == 0 {
+		return nil
+	}
+
+	unread := w.pendingUnread()
+	if unread == 0 {
+		return w.closePending()
+	}
+
+	next := newEntryBuffer(w.pendingLimitOrDefault(), bufferScopeMultiEntryPlain)
+	_, copyErr := io.CopyN(next, io.NewSectionReader(w.pending, int64(w.pendingOff), int64(unread)), int64(unread))
+	closeErr := w.pending.Close()
+	if copyErr != nil {
+		return errors.Join(copyErr, closeErr)
+	}
+	w.pending = next
+	w.pendingOff = 0
+	return closeErr
+}
+
+func (w *multiVolumeCompressedFileWriter) closePendingIfDrained() error {
+	if w.pendingUnread() != 0 {
+		return nil
+	}
+	return w.closePending()
+}
+
+func (w *multiVolumeCompressedFileWriter) closePending() error {
+	if w.pending == nil {
+		w.pendingOff = 0
+		return nil
+	}
+	err := w.pending.Close()
+	w.pending = nil
+	w.pendingOff = 0
+	return err
+}
+
+func (w *multiVolumeCompressedFileWriter) pendingUnread() uint64 {
+	if w.pending == nil {
+		return 0
+	}
+	size := w.pending.Size()
+	if w.pendingOff >= size {
+		return 0
+	}
+	return size - w.pendingOff
+}
+
+func (w *multiVolumeCompressedFileWriter) pendingLimitOrDefault() uint64 {
+	if w.pendingLimit != 0 {
+		return w.pendingLimit
+	}
+	return multiVolumeCompressedPendingLimit
+}
+
+func (w *multiVolumeCompressedFileWriter) method14InputLimitErr(attempted int) *BufferLimitError {
+	buffered := w.pendingUnread()
+	if buffered < w.method14InputLimit {
+		buffered = w.method14InputLimit
+	}
+	return &BufferLimitError{
+		Scope:     bufferScopeMethod14Input,
+		Limit:     w.method14InputLimit,
+		Buffered:  buffered,
+		Attempted: uint64(attempted),
+	}
+}
+
+func (w *multiVolumeCompressedFileWriter) prospectiveSegmentMaxComp() (int64, error) {
+	h, err := w.segmentHeaderTemplate(true)
+	if err != nil {
+		return 0, err
+	}
+	overhead, err := rawSegmentOverhead(&h)
+	if err != nil {
+		return 0, err
+	}
+
+	remaining := w.w.currentRemaining()
+	if w.lastSegment != nil || w.w.current == nil {
+		freshRemaining, err := w.w.freshVolumeRemaining()
+		if err != nil {
 			return 0, err
 		}
-		return n, nil
+		remaining = freshRemaining
 	}
+	return remaining - int64(overhead), nil
+}
+
+func (w *multiVolumeCompressedFileWriter) selectPendingSegment(maxComp int64) (int, []byte, uint32, error) {
+	unread := w.pendingUnread()
+	if unread == 0 {
+		return 0, nil, crc32.ChecksumIEEE(nil), nil
+	}
+	maxInt := uint64(^uint(0) >> 1)
+	if unread > maxInt {
+		unread = maxInt
+	}
+	return w.w.maxCompressedChunkBufferedWithCompressorAndCRC(
+		w.h.Method,
+		w.pending,
+		int64(w.pendingOff),
+		int(unread),
+		maxComp,
+		w.compressor,
+		w.method14InputLimit,
+	)
 }
 
 func (w *multiVolumeCompressedFileWriter) writeSegment(base FileHeader, plainSize uint64, comp []byte, crc uint32) error {
@@ -971,7 +1197,6 @@ func (w *multiVolumeCompressedFileWriter) writeSegment(base FileHeader, plainSiz
 		}
 	}
 	w.w.currentHasEntries = true
-	w.plainN += plainSize
 	w.resumePos += plainSize
 	w.continued = true
 	w.lastSegment = &multiVolumeCompressedSegment{
@@ -1013,6 +1238,11 @@ func (w *multiVolumeCompressedFileWriter) close() (err error) {
 		return nil
 	}
 	w.closed = true
+	defer func() {
+		if closeErr := w.closePending(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
 
 	if w.writeErr != nil {
 		if w.plainN != 0 || w.lastSegment != nil {
@@ -1024,6 +1254,10 @@ func (w *multiVolumeCompressedFileWriter) close() (err error) {
 		if err := w.emitEmptySegment(); err != nil {
 			return err
 		}
+	}
+	if err := w.flushPending(true); err != nil {
+		w.w.latchFailure(err)
+		return err
 	}
 	if w.lastSegment == nil {
 		return ErrFormat
@@ -2681,6 +2915,18 @@ func (w *MultiVolumeWriter) currentRemaining() int64 {
 		return w.volumeSize
 	}
 	return w.volumeSize - w.current.cw.Count() - 4
+}
+
+func (w *MultiVolumeWriter) freshVolumeRemaining() (int64, error) {
+	vw := NewWriter(io.Discard)
+	hdr := w.mainHeaderForVolume()
+	if err := vw.SetArchiveHeader(&hdr); err != nil {
+		return 0, err
+	}
+	if err := vw.writeMainHeader(); err != nil {
+		return 0, err
+	}
+	return w.volumeSize - vw.cw.Count() - 4, nil
 }
 
 func (w *MultiVolumeWriter) mainHeaderForVolume() ArchiveHeader {

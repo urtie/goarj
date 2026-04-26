@@ -776,6 +776,92 @@ func TestMultiVolumeWriterCompressedStreamingRoundTrip(t *testing.T) {
 	}
 }
 
+func TestMultiVolumeWriterCompressedStreamingCoalescesSmallWrites(t *testing.T) {
+	archivePath := filepath.Join(t.TempDir(), "compressed-small-writes.arj")
+	mw, err := NewMultiVolumeWriter(archivePath, MultiVolumeWriterOptions{
+		VolumeSize: 4 << 20,
+	})
+	if err != nil {
+		t.Fatalf("NewMultiVolumeWriter: %v", err)
+	}
+
+	iw, err := mw.Create("stream.bin")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	payload := make([]byte, 512<<10)
+	for i := range payload {
+		payload[i] = byte(i * 31)
+	}
+	if _, err := io.CopyBuffer(iw, bytes.NewReader(payload), make([]byte, 32<<10)); err != nil {
+		t.Fatalf("CopyBuffer: %v", err)
+	}
+	if err := iw.(io.Closer).Close(); err != nil {
+		t.Fatalf("Close entry: %v", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("Close writer: %v", err)
+	}
+	if got, want := len(mw.Parts()), 1; got != want {
+		t.Fatalf("parts len = %d, want %d", got, want)
+	}
+
+	rc, err := OpenMultiReader(archivePath)
+	if err != nil {
+		t.Fatalf("OpenMultiReader: %v", err)
+	}
+	defer rc.Close()
+	if got := mustReadFileEntry(t, rc.File[0]); !bytes.Equal(got, payload) {
+		t.Fatalf("payload mismatch")
+	}
+}
+
+func TestMultiVolumeWriterCompressedStreamingSplitsByCapacityNotWrites(t *testing.T) {
+	const customMethod uint16 = 240
+
+	archivePath := filepath.Join(t.TempDir(), "compressed-capacity.arj")
+	mw, err := NewMultiVolumeWriter(archivePath, MultiVolumeWriterOptions{
+		VolumeSize: 4096,
+	})
+	if err != nil {
+		t.Fatalf("NewMultiVolumeWriter: %v", err)
+	}
+	mw.RegisterCompressor(customMethod, func(out io.Writer) (io.WriteCloser, error) {
+		return nopWriteCloser{Writer: out}, nil
+	})
+
+	iw, err := mw.CreateHeader(&FileHeader{Name: "identity.bin", Method: customMethod})
+	if err != nil {
+		t.Fatalf("CreateHeader: %v", err)
+	}
+	payload := make([]byte, 10<<10)
+	for i := range payload {
+		payload[i] = byte(i * 17)
+	}
+	if _, err := io.CopyBuffer(iw, bytes.NewReader(payload), make([]byte, 512)); err != nil {
+		t.Fatalf("CopyBuffer: %v", err)
+	}
+	if err := iw.(io.Closer).Close(); err != nil {
+		t.Fatalf("Close entry: %v", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("Close writer: %v", err)
+	}
+	if got := len(mw.Parts()); got < 2 || got > 5 {
+		t.Fatalf("parts len = %d, want between 2 and 5", got)
+	}
+
+	rc, err := OpenMultiReader(archivePath)
+	if err != nil {
+		t.Fatalf("OpenMultiReader: %v", err)
+	}
+	defer rc.Close()
+	rc.RegisterDecompressor(customMethod, io.NopCloser)
+	if got := mustReadFileEntry(t, rc.File[0]); !bytes.Equal(got, payload) {
+		t.Fatalf("payload mismatch")
+	}
+}
+
 func TestMultiVolumeWriterCompressedStreamingVolumeTooSmall(t *testing.T) {
 	archivePath := filepath.Join(t.TempDir(), "compressed-too-small.arj")
 	mw, err := NewMultiVolumeWriter(archivePath, MultiVolumeWriterOptions{

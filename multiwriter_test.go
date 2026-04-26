@@ -273,7 +273,7 @@ func TestMultiVolumeWriterRoundTripOpenMultiReader(t *testing.T) {
 	}
 }
 
-func TestMultiVolumeWriterCompressedSmallWritesUseSeparateVolumes(t *testing.T) {
+func TestMultiVolumeWriterCompressedSmallWritesCoalesceIntoOneVolume(t *testing.T) {
 	tmp := t.TempDir()
 	archivePath := filepath.Join(tmp, "small-writes.arj")
 	chunks := [][]byte{
@@ -300,7 +300,7 @@ func TestMultiVolumeWriterCompressedSmallWritesUseSeparateVolumes(t *testing.T) 
 	if err := mw.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if got, want := len(mw.Parts()), len(chunks); got != want {
+	if got, want := len(mw.Parts()), 1; got != want {
 		t.Fatalf("part count = %d, want %d", got, want)
 	}
 
@@ -308,35 +308,23 @@ func TestMultiVolumeWriterCompressedSmallWritesUseSeparateVolumes(t *testing.T) 
 	if err != nil {
 		t.Fatalf("VolumePaths: %v", err)
 	}
-	if got, want := len(paths), len(chunks); got != want {
+	if got, want := len(paths), 1; got != want {
 		t.Fatalf("VolumePaths count = %d, want %d", got, want)
 	}
-	for i, path := range paths {
-		rc, err := OpenReader(path)
-		if err != nil {
-			t.Fatalf("OpenReader(%s): %v", path, err)
-		}
-		if got, want := len(rc.File), 1; got != want {
-			_ = rc.Close()
-			t.Fatalf("%s file count = %d, want %d", path, got, want)
-		}
-		gotFlags := rc.File[0].Flags & (FlagVolume | FlagExtFile)
-		wantFlags := FlagExtFile
-		switch i {
-		case 0:
-			wantFlags = FlagVolume
-		case len(paths) - 1:
-			wantFlags = FlagExtFile
-		default:
-			wantFlags = FlagVolume | FlagExtFile
-		}
-		if gotFlags != wantFlags {
-			_ = rc.Close()
-			t.Fatalf("%s continuation flags = 0x%02x, want 0x%02x", path, gotFlags, wantFlags)
-		}
-		if err := rc.Close(); err != nil {
-			t.Fatalf("Close(%s): %v", path, err)
-		}
+	rc, err := OpenReader(paths[0])
+	if err != nil {
+		t.Fatalf("OpenReader(%s): %v", paths[0], err)
+	}
+	if got, want := len(rc.File), 1; got != want {
+		_ = rc.Close()
+		t.Fatalf("%s file count = %d, want %d", paths[0], got, want)
+	}
+	if gotFlags := rc.File[0].Flags & (FlagVolume | FlagExtFile); gotFlags != 0 {
+		_ = rc.Close()
+		t.Fatalf("%s continuation flags = 0x%02x, want 0", paths[0], gotFlags)
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatalf("Close(%s): %v", paths[0], err)
 	}
 
 	mr, err := OpenMultiReader(archivePath)
